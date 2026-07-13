@@ -1,0 +1,51 @@
+# Secrets
+.env
+.env.*
+!.env.example
+
+# Python environment and caches
+venv/
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Python build and coverage
+build/
+dist/
+*.egg-info/
+.coverage
+htmlcov/
+
+# Frontend dependencies and caches
+node_modules/
+.vite/
+*.tsbuildinfo
+coverage/
+
+# Logs and runtime files
+*.log
+*.pid
+
+# Local databases
+*.db
+*.sqlite
+*.sqlite3
+
+# Generated data and exports
+data/raw/
+data/processed/
+generated/
+exports/
+
+# Editor files
+.vscode/
+.idea/
+
+# Operating-system files
+.DS_Store
+Thumbs.db
+
+# Deployment state 
