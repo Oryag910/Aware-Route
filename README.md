@@ -71,3 +71,35 @@ The initial work will focus on validating:
 * Whether useful running loops can be generated around restroom constraints
 * Whether runners consider this a meaningful and recurring problem
 
+## Development Setup
+
+### Backend
+
+```bash
+cd backend
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+uvicorn app.main:app --reload --reload-dir app
+```
+
+Backend health check:
+
+```text
+http://localhost:8000/health
+```
+
+### Frontend
+
+```bash
+cd frontend
+npm install
+npm run dev
+```
+
+Frontend:
+
+```text
+http://localhost:5173
+```
+
