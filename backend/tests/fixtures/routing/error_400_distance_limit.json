@@ -1,0 +1,6 @@
+{
+  "error": {
+    "code": 2004,
+    "message": "Request parameters exceed the server configuration limits. The requested route length must not be greater than 100000.0 meters."
+  }
+}
