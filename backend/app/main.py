@@ -1,4 +1,4 @@
-from typing import Annotated
+from typing import Annotated, Literal
 
 from fastapi import Depends, FastAPI, HTTPException
 from pydantic import BaseModel, Field
@@ -41,6 +41,7 @@ class RestroomRouteRequest(BaseModel):
     target_distance_m: Annotated[float, Field(gt=0)]
     restroom_min_mile: Annotated[float, Field(ge=0)]
     restroom_max_mile: Annotated[float, Field(gt=0)]
+    elevation_preference: Literal["flat", "moderate", "hilly"]
     count: Annotated[int, Field(ge=1, le=5)] = 3
 
 
@@ -60,6 +61,13 @@ class RankedRouteResponse(BaseModel):
     restroom: RestroomInfo
     distance_error_m: float
     mile_range_error_m: float
+    distance_error_norm: float
+    mile_range_error_norm: float
+    elevation_mismatch: float
+    repeated_segment_ratio: float
+    restroom_confidence: float
+    similarity_penalty: float
+    composite_score: float
 
 
 def get_routing_provider() -> RoutingProvider:
@@ -149,6 +157,7 @@ def get_routes_with_restroom(
         request.target_distance_m,
         request.restroom_min_mile * 1609.34,
         request.restroom_max_mile * 1609.34,
+        preferred_elevation_bucket=request.elevation_preference,
     )
 
     if not scored_candidates:
@@ -178,6 +187,13 @@ def get_routes_with_restroom(
             ),
             distance_error_m=scored.distance_error_m,
             mile_range_error_m=scored.mile_range_error_m,
+            distance_error_norm=scored.distance_error_norm,
+            mile_range_error_norm=scored.mile_range_error_norm,
+            elevation_mismatch=scored.elevation_mismatch,
+            repeated_segment_ratio=scored.repeated_segment_ratio,
+            restroom_confidence=scored.restroom_confidence,
+            similarity_penalty=scored.similarity_penalty,
+            composite_score=scored.composite_score,
         )
         for scored in scored_candidates
     ]
