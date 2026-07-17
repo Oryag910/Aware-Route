@@ -1,3 +1,5 @@
+import pytest
+
 from app.restrooms.models import Restroom
 from app.restrooms.waypoint_candidates import (
     get_restroom_first_candidates,
@@ -5,6 +7,16 @@ from app.restrooms.waypoint_candidates import (
 )
 from app.routing.errors import RouteNotFoundError
 from app.routing.provider import Coordinate, RouteCandidate, RoutePoint
+
+
+@pytest.fixture(autouse=True)
+def _single_worker(monkeypatch: pytest.MonkeyPatch) -> None:
+    # FakeWaypointProvider below pops canned responses off a list in
+    # call order, which is only deterministic with one worker at a
+    # time.
+    monkeypatch.setattr(
+        "app.routing.parallel.MAX_PARALLEL_ROUTING_CALLS", 1
+    )
 
 
 START = Coordinate(lat=40.70, lon=-74.00)

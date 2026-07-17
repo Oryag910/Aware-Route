@@ -1,7 +1,9 @@
+from collections.abc import Callable
 from dataclasses import dataclass
 
 from app.routing.errors import RouteNotFoundError, RoutingProviderError
 from app.routing.geometry import bearing_deg, destination_point, haversine_m
+from app.routing.parallel import run_concurrently
 from app.routing.provider import (
     Coordinate,
     RouteCandidate,
@@ -209,25 +211,65 @@ def repair_near_miss_candidates(
     provider_failed = False
 
     def run_pass(eligible: list[int]) -> None:
+        # Candidates within a pass are independent of each other (each
+        # only reads/writes its own anchors), so they can be repaired
+        # concurrently -- rounds stay sequential *within* a candidate
+        # since each round depends on the previous response.
         nonlocal remaining_calls, provider_failed
 
-        for index in eligible:
-            if remaining_calls <= 0 or provider_failed:
-                return
+        # Pre-assign budgets up front, most-promising-first (ascending
+        # error), since concurrent calls can't dynamically claim from
+        # a shared counter as they go. Any per-candidate budget left
+        # unused (e.g. it converges early) is NOT redistributed to
+        # later candidates in the pass -- that would require waiting
+        # for earlier candidates to finish, defeating the parallelism.
+        budgets: dict[int, int] = {}
+        budget_remaining = remaining_calls
 
-            outcome = _repair_candidate(
+        for index in eligible:
+            if budget_remaining <= 0:
+                break
+
+            assigned = min(
+                MAX_REPAIR_CALLS_PER_CANDIDATE, budget_remaining
+            )
+            budgets[index] = assigned
+            budget_remaining -= assigned
+
+        if not budgets:
+            return
+
+        def make_task(index: int) -> Callable[[], _RepairOutcome]:
+            return lambda: _repair_candidate(
                 provider,
                 targets[index],
                 start,
                 target_distance_m,
-                max_calls=min(
-                    MAX_REPAIR_CALLS_PER_CANDIDATE, remaining_calls
-                ),
+                max_calls=budgets[index],
             )
-            remaining_calls -= outcome.calls_used
+
+        tasks = [make_task(index) for index in budgets]
+        outcomes = run_concurrently(tasks)
+
+        calls_used_this_pass = 0
+        any_provider_failure = False
+
+        for index, outcome in zip(budgets, outcomes):
+            if isinstance(outcome, Exception):
+                # _repair_candidate only raises for bugs, not routing
+                # failures (those are caught internally and reported
+                # via _RepairOutcome.provider_failed) -- surface it.
+                raise outcome
+
+            calls_used_this_pass += outcome.calls_used
             repaired_indices.add(index)
             results[index] = outcome.best
-            provider_failed = outcome.provider_failed
+
+            if outcome.provider_failed:
+                any_provider_failure = True
+
+        remaining_calls -= calls_used_this_pass
+        provider_failed = any_provider_failure
 
     # First pass: near-misses, most promising (smallest error) first,
     # so the shared budget goes to the candidates likeliest to convert.
@@ -247,7 +289,11 @@ def repair_near_miss_candidates(
         error_m(candidate) > MAX_DISTANCE_ERROR_M for candidate in results
     )
 
-    if nothing_within_tolerance and not provider_failed:
+    if (
+        nothing_within_tolerance
+        and not provider_failed
+        and remaining_calls > 0
+    ):
         rescue_indices = sorted(
             (
                 index

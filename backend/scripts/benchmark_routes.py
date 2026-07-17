@@ -15,6 +15,12 @@ REQUEST_TIMEOUT_S = 60.0
 RATE_LIMIT_BACKOFF_S = 15.0
 MAX_ATTEMPTS_PER_REQUEST = 5
 
+# Each scenario now fires its ~20 ORS calls in parallel bursts rather
+# than one at a time, so back-to-back scenarios can blow the ~40/min
+# ORS free-tier quota. Pausing between scenarios keeps the benchmark's
+# response-time measurements free of rate-limit retry contamination.
+INTER_SCENARIO_SLEEP_S = 20.0
+
 
 @dataclass(frozen=True)
 class Scenario:
@@ -296,7 +302,7 @@ def save_results(results: list[ScenarioResult]) -> Path:
 def main() -> None:
     results: list[ScenarioResult] = []
 
-    for scenario in SCENARIOS:
+    for index, scenario in enumerate(SCENARIOS):
         print(f"Running: {scenario.name} ...")
         result = run_scenario(scenario)
         results.append(result)
@@ -306,6 +312,9 @@ def main() -> None:
             f"best_range_error_m={result.best_mile_range_error_m} "
             f"time={result.response_time_s:.1f}s"
         )
+
+        if index < len(SCENARIOS) - 1:
+            time.sleep(INTER_SCENARIO_SLEEP_S)
 
     print_summary(results)
     output_path = save_results(results)

@@ -11,6 +11,17 @@ from app.routing.repair import (
 )
 
 
+@pytest.fixture(autouse=True)
+def _single_worker(monkeypatch: pytest.MonkeyPatch) -> None:
+    # FakeRepairProvider below pops canned responses off a list in
+    # call order, which is only deterministic with one worker at a
+    # time -- repair still runs candidates one at a time, matching
+    # the pre-parallelism call ordering the tests assert on.
+    monkeypatch.setattr(
+        "app.routing.parallel.MAX_PARALLEL_ROUTING_CALLS", 1
+    )
+
+
 START = Coordinate(lat=40.70, lon=-74.00)
 TARGET_DISTANCE_M = 2220.0
 
@@ -159,28 +170,56 @@ def test_unroutable_anchor_falls_back_to_next_anchor() -> None:
     assert len(provider.calls) == 2
 
 
-def test_provider_error_halts_repair_for_the_whole_request() -> None:
-    first_near_miss = make_target(TARGET_DISTANCE_M + 200.0)
-    second_near_miss = make_target(TARGET_DISTANCE_M + 250.0)
+def test_provider_error_aborts_only_that_candidate() -> None:
+    # closer_near_miss (error 200) is more promising than
+    # further_near_miss (error 250), so it's tried first within the
+    # pass -- but both candidates are already "in flight" concurrently
+    # by the time it fails, so the provider error must only abort
+    # closer_near_miss's own repair, not further_near_miss's.
+    closer_near_miss = make_target(TARGET_DISTANCE_M + 200.0)
+    further_near_miss = make_target(TARGET_DISTANCE_M + 250.0)
+    corrected = make_candidate(TARGET_DISTANCE_M)
 
-    # A provider-level failure (rate limit, outage) on the first
-    # candidate must stop repair spending entirely -- the second
-    # candidate stays untouched even though budget remains.
+    provider = FakeRepairProvider(
+        waypoint_responses=[
+            RoutingProviderError("rate limited"),
+            corrected,
+        ]
+    )
+
+    result = repair_near_miss_candidates(
+        provider,
+        [closer_near_miss, further_near_miss],
+        START,
+        TARGET_DISTANCE_M,
+    )
+
+    # closer_near_miss keeps its best-so-far (its original candidate,
+    # since the only attempt failed); further_near_miss converges.
+    assert result == [closer_near_miss.candidate, corrected]
+    assert len(provider.calls) == 2
+
+
+def test_provider_failure_in_pass_one_skips_rescue_pass() -> None:
+    # Both candidates are near-misses so both are eligible for pass
+    # one. The first one attempted hits a provider error; even though
+    # neither candidate ends up within tolerance and budget remains,
+    # the rescue pass must be skipped once any candidate in pass one
+    # hit a provider failure.
+    only_near_miss = make_target(TARGET_DISTANCE_M + 200.0)
+
     provider = FakeRepairProvider(
         waypoint_responses=[RoutingProviderError("rate limited")]
     )
 
     result = repair_near_miss_candidates(
         provider,
-        [first_near_miss, second_near_miss],
+        [only_near_miss],
         START,
         TARGET_DISTANCE_M,
     )
 
-    assert result == [
-        first_near_miss.candidate,
-        second_near_miss.candidate,
-    ]
+    assert result == [only_near_miss.candidate]
     assert len(provider.calls) == 1
 
 

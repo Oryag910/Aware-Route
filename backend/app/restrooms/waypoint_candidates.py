@@ -1,8 +1,10 @@
+from collections.abc import Callable
 from dataclasses import dataclass
 
 from app.restrooms.models import Restroom
 from app.routing.errors import RouteNotFoundError, RoutingProviderError
 from app.routing.geometry import haversine_m
+from app.routing.parallel import run_concurrently
 from app.routing.provider import Coordinate, RouteCandidate, RoutingProvider
 
 
@@ -66,24 +68,37 @@ def get_restroom_first_candidates(
     selected = select_candidate_restrooms(
         restrooms, start, min_mile_m, max_mile_m, limit
     )
+    waypoints = [
+        Coordinate(lat=restroom.latitude, lon=restroom.longitude)
+        for restroom in selected
+    ]
+
+    def make_task(
+        waypoint: Coordinate,
+    ) -> Callable[[], RouteCandidate]:
+        return lambda: provider.get_route_through_waypoints(
+            [start, waypoint, start]
+        )
+
+    tasks = [make_task(waypoint) for waypoint in waypoints]
+    results = run_concurrently(tasks)
 
     candidates: list[RestroomFirstCandidate] = []
 
-    for restroom in selected:
-        waypoint = Coordinate(
-            lat=restroom.latitude, lon=restroom.longitude
-        )
+    for waypoint, result in zip(waypoints, results):
+        if isinstance(result, Exception):
+            if not isinstance(
+                result, (RouteNotFoundError, RoutingProviderError)
+            ):
+                raise result
 
-        try:
-            candidate = provider.get_route_through_waypoints(
-                [start, waypoint, start]
-            )
-        except (RouteNotFoundError, RoutingProviderError):
+            # This restroom is unreachable -- skip it rather than
+            # failing the whole request, same as before parallelism.
             continue
 
         candidates.append(
             RestroomFirstCandidate(
-                candidate=candidate, restroom_waypoint=waypoint
+                candidate=result, restroom_waypoint=waypoint
             )
         )
 
