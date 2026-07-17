@@ -16,12 +16,25 @@ MODERATE_MAX_GAIN_PER_KM = 25.0
 
 BUCKET_ORDER = ("flat", "moderate", "hilly")
 
-WEIGHT_DISTANCE_ERROR = 0.35
-WEIGHT_MILE_RANGE_ERROR = 0.30
-WEIGHT_ELEVATION_MISMATCH = 0.15
-WEIGHT_REPEATED_SEGMENT = 0.10
-WEIGHT_SIMILARITY_PENALTY = 0.05
-WEIGHT_RESTROOM_CONFIDENCE = 0.05
+MAX_DISTANCE_ERROR_M = 100.0
+MAX_RESTROOM_RANGE_ERROR_M = 500.0
+
+# Renormalized from the original 15:10:5:5 ratio now that distance_error
+# and mile_range_error are hard constraints instead of weighted factors.
+# 15:10:5:5 reduces to 3:2:1:1 (dividing by 5), and 3+2+1+1 = 7, so each
+# weight becomes its exact share of 7 — this preserves the original
+# relative ratios among the four remaining factors.
+WEIGHT_ELEVATION_MISMATCH = 3 / 7
+WEIGHT_REPEATED_SEGMENT = 2 / 7
+WEIGHT_SIMILARITY_PENALTY = 1 / 7
+WEIGHT_RESTROOM_CONFIDENCE = 1 / 7
+
+# Fallback candidates (those failing a hard constraint) are ranked by
+# combined normalized distance+range error, weighted equally — a
+# simpler ranking since the point of a fallback is "closest to what
+# was asked," not route-quality nuance.
+WEIGHT_FALLBACK_DISTANCE_ERROR = 0.5
+WEIGHT_FALLBACK_MILE_RANGE_ERROR = 0.5
 
 
 def restroom_confidence(restroom: Restroom) -> float:
@@ -118,6 +131,8 @@ class _PartialScore:
     restroom_match: RestroomMatch
     distance_error_m: float
     mile_range_error_m: float
+    off_route_distance_m: float
+    matched: bool
     repeated_segment_ratio: float
     elevation_mismatch: float
     restroom_confidence: float
@@ -129,6 +144,8 @@ class ScoredCandidate:
     restroom_match: RestroomMatch
     distance_error_m: float
     mile_range_error_m: float
+    off_route_distance_m: float
+    matched: bool
     distance_error_norm: float
     mile_range_error_norm: float
     elevation_mismatch: float
@@ -136,6 +153,115 @@ class ScoredCandidate:
     restroom_confidence: float
     similarity_penalty: float
     composite_score: float
+
+
+def _rank_matched(
+    matched: list[_PartialScore],
+    distance_error_norms: list[float],
+    mile_range_error_norms: list[float],
+) -> list[ScoredCandidate]:
+    if not matched:
+        return []
+
+    # Subtotal excludes similarity, since similarity depends on the
+    # ranking order this subtotal is used to establish (see below).
+    subtotals = [
+        WEIGHT_ELEVATION_MISMATCH * partial.elevation_mismatch
+        + WEIGHT_REPEATED_SEGMENT * partial.repeated_segment_ratio
+        + WEIGHT_RESTROOM_CONFIDENCE
+        * (1.0 - partial.restroom_confidence)
+        for partial in matched
+    ]
+
+    # Similarity is computed against this provisional (3-factor) order
+    # rather than searching all orderings — similarity's own weight
+    # (1/7) is small enough that this approximation is reasonable.
+    provisional_order = sorted(
+        range(len(matched)),
+        key=lambda index: subtotals[index],
+    )
+
+    higher_ranked_geometries: list[tuple[RoutePoint, ...]] = []
+    similarity_penalties: list[float] = [0.0] * len(matched)
+
+    for index in provisional_order:
+        geometry = matched[index].candidate.geometry
+
+        similarity_penalties[index] = similarity_penalty_for_candidate(
+            geometry,
+            higher_ranked_geometries,
+        )
+
+        higher_ranked_geometries.append(geometry)
+
+    scored_candidates = [
+        ScoredCandidate(
+            candidate=partial.candidate,
+            restroom_match=partial.restroom_match,
+            distance_error_m=partial.distance_error_m,
+            mile_range_error_m=partial.mile_range_error_m,
+            off_route_distance_m=partial.off_route_distance_m,
+            matched=partial.matched,
+            distance_error_norm=distance_error_norms[index],
+            mile_range_error_norm=mile_range_error_norms[index],
+            elevation_mismatch=partial.elevation_mismatch,
+            repeated_segment_ratio=partial.repeated_segment_ratio,
+            restroom_confidence=partial.restroom_confidence,
+            similarity_penalty=similarity_penalties[index],
+            composite_score=(
+                subtotals[index]
+                + WEIGHT_SIMILARITY_PENALTY
+                * similarity_penalties[index]
+            ),
+        )
+        for index, partial in enumerate(matched)
+    ]
+
+    scored_candidates.sort(
+        key=lambda scored_candidate: scored_candidate.composite_score
+    )
+
+    return scored_candidates
+
+
+def _rank_fallback(
+    fallback: list[_PartialScore],
+    distance_error_norms: list[float],
+    mile_range_error_norms: list[float],
+) -> list[ScoredCandidate]:
+    # Fallback candidates skip the composite/similarity machinery
+    # entirely — the point of a fallback is "closest to what was
+    # asked," not route-quality nuance, so it's ranked purely by
+    # combined normalized distance+range error.
+    scored_candidates = [
+        ScoredCandidate(
+            candidate=partial.candidate,
+            restroom_match=partial.restroom_match,
+            distance_error_m=partial.distance_error_m,
+            mile_range_error_m=partial.mile_range_error_m,
+            off_route_distance_m=partial.off_route_distance_m,
+            matched=partial.matched,
+            distance_error_norm=distance_error_norms[index],
+            mile_range_error_norm=mile_range_error_norms[index],
+            elevation_mismatch=partial.elevation_mismatch,
+            repeated_segment_ratio=partial.repeated_segment_ratio,
+            restroom_confidence=partial.restroom_confidence,
+            similarity_penalty=0.0,
+            composite_score=(
+                WEIGHT_FALLBACK_DISTANCE_ERROR
+                * distance_error_norms[index]
+                + WEIGHT_FALLBACK_MILE_RANGE_ERROR
+                * mile_range_error_norms[index]
+            ),
+        )
+        for index, partial in enumerate(fallback)
+    ]
+
+    scored_candidates.sort(
+        key=lambda scored_candidate: scored_candidate.composite_score
+    )
+
+    return scored_candidates
 
 
 def score_and_rank_candidates(
@@ -179,6 +305,11 @@ def score_and_rank_candidates(
                 restroom_match=best_match,
                 distance_error_m=distance_error,
                 mile_range_error_m=range_error,
+                off_route_distance_m=best_match.distance_to_route_m,
+                matched=(
+                    distance_error <= MAX_DISTANCE_ERROR_M
+                    and range_error <= MAX_RESTROOM_RANGE_ERROR_M
+                ),
                 repeated_segment_ratio=repeated_segment_ratio(
                     candidate.geometry
                 ),
@@ -202,62 +333,26 @@ def score_and_rank_candidates(
         [partial.mile_range_error_m for partial in partial_scores]
     )
 
-    # Subtotal excludes similarity, since similarity depends on the
-    # ranking order this subtotal is used to establish (see below).
-    subtotals = [
-        WEIGHT_DISTANCE_ERROR * distance_error_norms[index]
-        + WEIGHT_MILE_RANGE_ERROR * mile_range_error_norms[index]
-        + WEIGHT_ELEVATION_MISMATCH * partial.elevation_mismatch
-        + WEIGHT_REPEATED_SEGMENT * partial.repeated_segment_ratio
-        + WEIGHT_RESTROOM_CONFIDENCE
-        * (1.0 - partial.restroom_confidence)
+    matched_indices = [
+        index
         for index, partial in enumerate(partial_scores)
+        if partial.matched
+    ]
+    fallback_indices = [
+        index
+        for index, partial in enumerate(partial_scores)
+        if not partial.matched
     ]
 
-    # Similarity is computed against this provisional (5-factor) order
-    # rather than searching all orderings — similarity's own weight
-    # (0.05) is small enough that this approximation is reasonable.
-    provisional_order = sorted(
-        range(len(partial_scores)),
-        key=lambda index: subtotals[index],
+    matched_scored = _rank_matched(
+        [partial_scores[index] for index in matched_indices],
+        [distance_error_norms[index] for index in matched_indices],
+        [mile_range_error_norms[index] for index in matched_indices],
+    )
+    fallback_scored = _rank_fallback(
+        [partial_scores[index] for index in fallback_indices],
+        [distance_error_norms[index] for index in fallback_indices],
+        [mile_range_error_norms[index] for index in fallback_indices],
     )
 
-    higher_ranked_geometries: list[tuple[RoutePoint, ...]] = []
-    similarity_penalties: list[float] = [0.0] * len(partial_scores)
-
-    for index in provisional_order:
-        geometry = partial_scores[index].candidate.geometry
-
-        similarity_penalties[index] = similarity_penalty_for_candidate(
-            geometry,
-            higher_ranked_geometries,
-        )
-
-        higher_ranked_geometries.append(geometry)
-
-    scored_candidates = [
-        ScoredCandidate(
-            candidate=partial.candidate,
-            restroom_match=partial.restroom_match,
-            distance_error_m=partial.distance_error_m,
-            mile_range_error_m=partial.mile_range_error_m,
-            distance_error_norm=distance_error_norms[index],
-            mile_range_error_norm=mile_range_error_norms[index],
-            elevation_mismatch=partial.elevation_mismatch,
-            repeated_segment_ratio=partial.repeated_segment_ratio,
-            restroom_confidence=partial.restroom_confidence,
-            similarity_penalty=similarity_penalties[index],
-            composite_score=(
-                subtotals[index]
-                + WEIGHT_SIMILARITY_PENALTY
-                * similarity_penalties[index]
-            ),
-        )
-        for index, partial in enumerate(partial_scores)
-    ]
-
-    scored_candidates.sort(
-        key=lambda scored_candidate: scored_candidate.composite_score
-    )
-
-    return scored_candidates
+    return matched_scored + fallback_scored

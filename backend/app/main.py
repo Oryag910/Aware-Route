@@ -27,6 +27,14 @@ app = FastAPI(title="Aware Running Route API")
 
 routing_provider = OpenRouteServiceProvider()
 
+# Internal candidate pool size for /routes/with-restroom, independent of
+# the request's `count` (which now only controls how many *ranked*
+# results are returned). 12 gives the scorer a meaningfully larger pool
+# to choose matched/fallback candidates from than the old 3-5, while
+# staying well within ORS's free-tier daily request budget (~2000/day —
+# 12 calls/request supports ~150-200 requests/day).
+GENERATE_CANDIDATE_COUNT = 12
+
 
 class RouteRequest(BaseModel):
     start_lat: float
@@ -59,6 +67,8 @@ class RankedRouteResponse(BaseModel):
     distance_m: float
     elevation_gain_m: float
     restroom: RestroomInfo
+    matched: bool
+    off_route_distance_m: float
     distance_error_m: float
     mile_range_error_m: float
     distance_error_norm: float
@@ -138,7 +148,7 @@ def get_routes_with_restroom(
             provider,
             start,
             request.target_distance_m,
-            request.count,
+            GENERATE_CANDIDATE_COUNT,
         )
     except RouteNotFoundError as exc:
         raise HTTPException(
@@ -185,6 +195,8 @@ def get_routes_with_restroom(
                 longitude=scored.restroom_match.restroom.longitude,
                 mile_marker_m=scored.restroom_match.mile_marker_m,
             ),
+            matched=scored.matched,
+            off_route_distance_m=scored.off_route_distance_m,
             distance_error_m=scored.distance_error_m,
             mile_range_error_m=scored.mile_range_error_m,
             distance_error_norm=scored.distance_error_norm,
@@ -195,5 +207,5 @@ def get_routes_with_restroom(
             similarity_penalty=scored.similarity_penalty,
             composite_score=scored.composite_score,
         )
-        for scored in scored_candidates
+        for scored in scored_candidates[: request.count]
     ]

@@ -302,14 +302,12 @@ def test_normalize_min_max_scales_to_unit_range() -> None:
     ]
 
 
-def test_score_and_rank_candidates_sorts_by_composite_score() -> None:
+def test_score_and_rank_candidates_splits_matched_and_fallback() -> None:
     # All three candidates share the same 3-point geometry shape (just
     # shifted far apart in longitude, so they never overlap for
     # similarity purposes), the same elevation_gain_m (so all fall in
     # the "flat" bucket), and restrooms with no hours/accessibility (so
-    # restroom_confidence is identical for all three). That isolates
-    # the ranking to distance_error and mile_range_error, batch-
-    # normalized, which is what this test verifies by hand.
+    # restroom_confidence is identical for all three).
     candidate_a = make_candidate(
         start_lat=40.70,
         longitude=-74.00,
@@ -359,36 +357,41 @@ def test_score_and_rank_candidates_sorts_by_composite_score() -> None:
         preferred_elevation_bucket="flat",
     )
 
-    # Raw errors (unchanged from the two-factor version):
+    # Raw errors:
     #   a: mile_range=0,    distance=300
     #   b: mile_range=0,    distance=100
     #   c: mile_range=1000, distance=0
-    # Batch-normalized (min-max over the 3 candidates):
-    #   distance_norm: a=1.0,     b=0.3333, c=0.0
-    #   mile_norm:     a=0.0,     b=0.0,    c=1.0
-    # elevation/repeated-segment/similarity are 0 for all three here,
-    # and restroom_confidence (0.5) is identical for all three, so
-    # composite_score = 0.35*distance_norm + 0.30*mile_norm + 0.025
-    #   a: 0.35*1.0    + 0.30*0.0 + 0.025 = 0.375
-    #   b: 0.35*0.3333 + 0.30*0.0 + 0.025 = 0.14167
-    #   c: 0.35*0.0    + 0.30*1.0 + 0.025 = 0.325
-    # -> ascending order: b, c, a
+    # Hard constraints: MAX_DISTANCE_ERROR_M=100, MAX_RESTROOM_RANGE_ERROR_M=500
+    #   a: distance=300 > 100           -> fallback
+    #   b: distance=100 <= 100, range=0 -> matched
+    #   c: range=1000 > 500             -> fallback
+    # Only b is matched, so it's alone in the matched pool (composite
+    # ranking among a single candidate is trivially first). a and c are
+    # both fallback, ranked by normalized distance+range error:
+    # Batch-normalized (min-max over the 3 candidates, computed across
+    # the full pool before the matched/fallback split):
+    #   distance_norm: a=1.0, b=0.3333, c=0.0
+    #   mile_norm:     a=0.0, b=0.0,    c=1.0
+    # fallback composite = 0.5*distance_norm + 0.5*mile_norm
+    #   a: 0.5*1.0 + 0.5*0.0 = 0.5
+    #   c: 0.5*0.0 + 0.5*1.0 = 0.5
+    # a and c tie on fallback composite_score (0.5 each); Python's sort
+    # is stable, and a was appended to partial_scores before c, so a
+    # sorts before c.
     assert [
         scored.candidate
         for scored in result
     ] == [
         candidate_b,
-        candidate_c,
         candidate_a,
+        candidate_c,
     ]
 
-    for scored in result:
-        assert scored.elevation_mismatch == pytest.approx(0.0)
-        assert scored.repeated_segment_ratio == pytest.approx(0.0)
-        assert scored.restroom_confidence == pytest.approx(0.5)
-        assert scored.similarity_penalty == pytest.approx(0.0)
+    scored_b, scored_a, scored_c = result
 
-    scored_b, scored_c, scored_a = result
+    assert scored_b.matched is True
+    assert scored_a.matched is False
+    assert scored_c.matched is False
 
     assert scored_a.distance_error_norm == pytest.approx(1.0)
     assert scored_b.distance_error_norm == pytest.approx(1 / 3)
@@ -398,6 +401,154 @@ def test_score_and_rank_candidates_sorts_by_composite_score() -> None:
     assert scored_b.mile_range_error_norm == pytest.approx(0.0)
     assert scored_c.mile_range_error_norm == pytest.approx(1.0)
 
-    assert scored_a.composite_score == pytest.approx(0.375)
-    assert scored_b.composite_score == pytest.approx(0.14167, abs=1e-4)
-    assert scored_c.composite_score == pytest.approx(0.325)
+    assert scored_a.composite_score == pytest.approx(0.5)
+    assert scored_c.composite_score == pytest.approx(0.5)
+
+    # b is the sole matched candidate: its composite score is the
+    # renormalized 4-factor formula, and since elevation/repeated-
+    # segment/similarity are all 0 and restroom_confidence is 0.5
+    # (identical across all three restrooms), b's composite collapses
+    # to just the restroom-confidence term.
+    #   composite = (3/7)*0 + (2/7)*0 + (1/7)*0 + (1/7)*(1 - 0.5)
+    #             = (1/7)*0.5 = 1/14
+    assert scored_b.composite_score == pytest.approx(1 / 14)
+    assert scored_b.elevation_mismatch == pytest.approx(0.0)
+    assert scored_b.repeated_segment_ratio == pytest.approx(0.0)
+    assert scored_b.restroom_confidence == pytest.approx(0.5)
+    assert scored_b.similarity_penalty == pytest.approx(0.0)
+
+
+def test_score_and_rank_candidates_ranks_matched_pool_by_renormalized_composite() -> None:  # noqa: E501
+    # Two candidates, both matched (small distance/range error), that
+    # differ only in elevation_mismatch. This isolates the renormalized
+    # composite among a purely-matched pool, verifying the 3/7 weight
+    # on elevation_mismatch is applied as expected.
+    flat_candidate = make_candidate_with_gain(
+        elevation_gain_m=0.0,
+        distance_m=1000.0,
+    )
+    hilly_candidate = make_candidate_with_gain(
+        elevation_gain_m=40.0,
+        distance_m=1000.0,
+    )
+
+    restroom = make_restroom(
+        source_id="shared",
+        latitude=40.70,
+        longitude=-74.00,
+    )
+
+    result = score_and_rank_candidates(
+        candidates=[hilly_candidate, flat_candidate],
+        restrooms=[restroom],
+        target_distance_m=1000.0,
+        min_mile_m=0.0,
+        max_mile_m=100.0,
+        preferred_elevation_bucket="flat",
+    )
+
+    assert [scored.candidate for scored in result] == [
+        flat_candidate,
+        hilly_candidate,
+    ]
+
+    for scored in result:
+        assert scored.matched is True
+
+    scored_flat, scored_hilly = result
+
+    # flat_candidate: gain_per_km=0 -> "flat" bucket -> mismatch 0.0
+    # hilly_candidate: gain_per_km=40 -> "hilly" bucket -> mismatch 1.0
+    # Both restroom_confidence=0.5, repeated_segment_ratio=0. Both
+    # candidates use make_candidate_with_gain()'s single-point geometry
+    # at the same lat/lon, so they are a 100% grid-cell overlap: the
+    # provisional order ranks flat first (lower subtotal), so hilly's
+    # similarity_penalty against the already-ranked flat geometry is
+    # 1.0 (full overlap), while flat -- ranked first, nothing above it
+    # -- gets 0.0.
+    #   flat:  (3/7)*0.0 + (1/7)*0.5 + (1/7)*0.0 = 1/14
+    #   hilly: (3/7)*1.0 + (1/7)*0.5 + (1/7)*1.0 = 3/7 + 1/14 + 1/7
+    #        = 6/14 + 1/14 + 2/14 = 9/14
+    assert scored_flat.composite_score == pytest.approx(1 / 14)
+    assert scored_hilly.composite_score == pytest.approx(9 / 14)
+    assert scored_flat.similarity_penalty == pytest.approx(0.0)
+    assert scored_hilly.similarity_penalty == pytest.approx(1.0)
+
+
+def test_score_and_rank_candidates_backfills_with_fallback_when_understocked() -> None:  # noqa: E501
+    # One matched candidate and one fallback candidate. The plan's
+    # design says scoring returns ALL matched+fallback candidates in
+    # final order (matched first, then fallback) — main.py, not
+    # scoring.py, is responsible for slicing to `count`. This test
+    # confirms both pools are present and correctly ordered/labeled
+    # even when the matched pool alone wouldn't fill a request.
+    matched_candidate = make_candidate(
+        start_lat=40.70,
+        longitude=-74.00,
+        distance_m=1000.0,
+    )
+    fallback_candidate = make_candidate(
+        start_lat=40.70,
+        longitude=-73.90,
+        distance_m=5000.0,
+    )
+
+    restroom_near_matched = make_restroom(
+        source_id="near-matched",
+        latitude=40.71,
+        longitude=-74.00,
+    )
+    restroom_near_fallback = make_restroom(
+        source_id="near-fallback",
+        latitude=40.71,
+        longitude=-73.90,
+    )
+
+    result = score_and_rank_candidates(
+        candidates=[fallback_candidate, matched_candidate],
+        restrooms=[restroom_near_matched, restroom_near_fallback],
+        target_distance_m=1000.0,
+        min_mile_m=1000.0,
+        max_mile_m=1200.0,
+        preferred_elevation_bucket="flat",
+    )
+
+    assert len(result) == 2
+
+    assert result[0].candidate == matched_candidate
+    assert result[0].matched is True
+
+    assert result[1].candidate == fallback_candidate
+    assert result[1].matched is False
+
+
+def test_score_and_rank_candidates_off_route_distance_m_surfaces_match_field() -> None:  # noqa: E501
+    candidate = make_candidate(
+        start_lat=40.70,
+        longitude=-74.00,
+        distance_m=1000.0,
+    )
+    restroom = make_restroom(
+        source_id="only",
+        latitude=40.70,
+        longitude=-74.00,
+    )
+
+    result = score_and_rank_candidates(
+        candidates=[candidate],
+        restrooms=[restroom],
+        target_distance_m=1000.0,
+        min_mile_m=0.0,
+        max_mile_m=100.0,
+        preferred_elevation_bucket="flat",
+    )
+
+    assert len(result) == 1
+    # off_route_distance_m is a direct passthrough of
+    # RestroomMatch.distance_to_route_m, which make_match() (and the
+    # real match_restrooms_to_route()) sets from the restroom's
+    # nearest-point distance to the route -- here it's the fixed 10.0
+    # used by geo.py's real matching for a restroom placed on the route.
+    assert result[0].off_route_distance_m == pytest.approx(
+        result[0].restroom_match.distance_to_route_m
+    )
