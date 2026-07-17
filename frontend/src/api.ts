@@ -40,6 +40,11 @@ export type RankedRoute = {
   sharp_turn_count: number;
   u_turn_count: number;
   compactness: number;
+  smoothed_gain_m: number;
+  climb_count: number;
+  longest_climb_m: number;
+  longest_climb_grade_pct: number;
+  max_grade_pct: number;
 };
 
 export class ApiError extends Error {

@@ -23,6 +23,17 @@ function restroomFact(route: RankedRoute): string {
   return `Restroom at mile ${mile} (${name}) — ~${offRouteM} m detour required`;
 }
 
+function climbFact(route: RankedRoute): string | null {
+  if (route.climb_count === 0) {
+    return null;
+  }
+
+  const meters = Math.round(route.longest_climb_m);
+  const grade = route.longest_climb_grade_pct.toFixed(1);
+
+  return `Longest climb: ${meters} m at ${grade}%`;
+}
+
 function sharpTurnsFact(route: RankedRoute): string {
   const turnLabel =
     route.sharp_turn_count === 1
@@ -48,7 +59,13 @@ export function routeFacts(route: RankedRoute): string[] {
 
   facts.push(`${formatMiles(route.distance_m)} mi`);
   facts.push(restroomFact(route));
-  facts.push(`${Math.round(route.elevation_gain_m)} m elevation gain`);
+  facts.push(`${Math.round(route.smoothed_gain_m)} m elevation gain`);
+
+  const climb = climbFact(route);
+  if (climb !== null) {
+    facts.push(climb);
+  }
+
   facts.push(
     `${route.signal_count} traffic signals · ${route.crossing_count} crossings`,
   );
@@ -103,7 +120,7 @@ export function tradeoffLine(
     }
   }
 
-  const elevationDelta = route.elevation_gain_m - best.elevation_gain_m;
+  const elevationDelta = route.smoothed_gain_m - best.smoothed_gain_m;
   if (Math.abs(elevationDelta) >= 10) {
     const meters = Math.round(Math.abs(elevationDelta));
 

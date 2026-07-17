@@ -108,6 +108,11 @@ class RankedRouteResponse(BaseModel):
     sharp_turn_count: int
     u_turn_count: int
     compactness: float
+    smoothed_gain_m: float
+    climb_count: int
+    longest_climb_m: float
+    longest_climb_grade_pct: float
+    max_grade_pct: float
 
 
 def get_routing_provider() -> RoutingProvider:
@@ -329,6 +334,11 @@ def get_routes_with_restroom(
             sharp_turn_count=scored.sharp_turn_count,
             u_turn_count=scored.u_turn_count,
             compactness=scored.compactness,
+            smoothed_gain_m=scored.smoothed_gain_m,
+            climb_count=scored.climb_count,
+            longest_climb_m=scored.longest_climb_m,
+            longest_climb_grade_pct=scored.longest_climb_grade_pct,
+            max_grade_pct=scored.max_grade_pct,
         )
         for scored in scored_candidates[: request.count]
     ]

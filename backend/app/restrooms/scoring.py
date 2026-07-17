@@ -1,5 +1,10 @@
 from dataclasses import dataclass
 
+from app.flow.elevation import (
+    detect_climbs,
+    max_grade_pct,
+    smoothed_gain_m,
+)
 from app.flow.interruptions import InterruptionStore, route_interruptions
 from app.flow.shape import compactness, sharp_turn_count, u_turn_count
 from app.flow.surfaces import contains_stairs, pedestrian_path_ratio
@@ -106,18 +111,42 @@ def elevation_mismatch_norm(
     candidate: RouteCandidate,
     preferred_bucket: str,
 ) -> float:
-    gain_per_km = candidate.elevation_gain_m / (
-        candidate.distance_m / 1000.0
-    )
+    # Fewer than 2 geometry points means the smoothed profile can't be
+    # computed (smooth_elevations/detect_climbs both degrade to
+    # raw/empty) -- this keeps degenerate or synthetic candidates (e.g.
+    # single-point test fixtures) working off the raw ORS total, same
+    # as before this phase.
+    if len(candidate.geometry) < 2:
+        gain_m = candidate.elevation_gain_m
+    else:
+        gain_m = smoothed_gain_m(candidate.geometry)
+
+    gain_per_km = gain_m / (candidate.distance_m / 1000.0)
 
     candidate_bucket = elevation_bucket(gain_per_km)
 
     candidate_index = BUCKET_ORDER.index(candidate_bucket)
     preferred_index = BUCKET_ORDER.index(preferred_bucket)
 
-    return abs(candidate_index - preferred_index) / (
+    mismatch = abs(candidate_index - preferred_index) / (
         len(BUCKET_ORDER) - 1
     )
+
+    climb_count = len(detect_climbs(candidate.geometry))
+
+    # A route whose *total* gain nets out flat can still contain a real
+    # sustained climb (rolling terrain that returns to the same
+    # elevation) -- that's not what a "flat" preference is asking for,
+    # so floor the mismatch at "adjacent bucket" rather than reporting
+    # a false 0. Symmetrically, a "hilly" preference wants an actual
+    # climb, not total gain made of rolling/noise jitter with no single
+    # sustained climb in it -- floor that case the same way.
+    if preferred_bucket == "flat" and climb_count >= 1:
+        mismatch = max(mismatch, 0.5)
+    elif preferred_bucket == "hilly" and climb_count == 0:
+        mismatch = max(mismatch, 0.5)
+
+    return mismatch
 
 
 def mile_range_error_m(
@@ -211,6 +240,11 @@ class _PartialScore:
     sharp_turn_count: int
     u_turn_count: int
     compactness: float
+    smoothed_gain_m: float
+    climb_count: int
+    longest_climb_m: float
+    longest_climb_grade_pct: float
+    max_grade_pct: float
 
 
 @dataclass(frozen=True)
@@ -237,6 +271,11 @@ class ScoredCandidate:
     sharp_turn_count: int
     u_turn_count: int
     compactness: float
+    smoothed_gain_m: float
+    climb_count: int
+    longest_climb_m: float
+    longest_climb_grade_pct: float
+    max_grade_pct: float
 
 
 def _rank_matched(
@@ -310,6 +349,11 @@ def _rank_matched(
             sharp_turn_count=partial.sharp_turn_count,
             u_turn_count=partial.u_turn_count,
             compactness=partial.compactness,
+            smoothed_gain_m=partial.smoothed_gain_m,
+            climb_count=partial.climb_count,
+            longest_climb_m=partial.longest_climb_m,
+            longest_climb_grade_pct=partial.longest_climb_grade_pct,
+            max_grade_pct=partial.max_grade_pct,
         )
         for index, partial in enumerate(matched)
     ]
@@ -359,6 +403,11 @@ def _rank_fallback(
             sharp_turn_count=partial.sharp_turn_count,
             u_turn_count=partial.u_turn_count,
             compactness=partial.compactness,
+            smoothed_gain_m=partial.smoothed_gain_m,
+            climb_count=partial.climb_count,
+            longest_climb_m=partial.longest_climb_m,
+            longest_climb_grade_pct=partial.longest_climb_grade_pct,
+            max_grade_pct=partial.max_grade_pct,
         )
         for index, partial in enumerate(fallback)
     ]
@@ -411,6 +460,13 @@ def score_and_rank_candidates(
             interruption_store,
         )
 
+        climbs = detect_climbs(candidate.geometry)
+        longest_climb = (
+            max(climbs, key=lambda climb: climb.length_m)
+            if climbs
+            else None
+        )
+
         partial_scores.append(
             _PartialScore(
                 candidate=candidate,
@@ -449,6 +505,19 @@ def score_and_rank_candidates(
                 sharp_turn_count=sharp_turn_count(candidate.geometry),
                 u_turn_count=u_turn_count(candidate.geometry),
                 compactness=compactness(candidate.geometry),
+                smoothed_gain_m=smoothed_gain_m(candidate.geometry),
+                climb_count=len(climbs),
+                longest_climb_m=(
+                    longest_climb.length_m
+                    if longest_climb is not None
+                    else 0.0
+                ),
+                longest_climb_grade_pct=(
+                    longest_climb.avg_grade_pct
+                    if longest_climb is not None
+                    else 0.0
+                ),
+                max_grade_pct=max_grade_pct(candidate.geometry),
             )
         )
 

@@ -1,5 +1,6 @@
 import pytest
 
+from app.flow.elevation import detect_climbs
 from app.flow.interruptions import InterruptionStore, _build_cell_index
 from app.flow.shape import compactness, sharp_turn_count, u_turn_count
 from app.restrooms.geo import RESTROOM_PROXIMITY_THRESHOLD_M, RestroomMatch
@@ -107,6 +108,44 @@ def make_candidate_with_gain(
         geometry=geometry,
         distance_m=distance_m,
         elevation_gain_m=elevation_gain_m,
+    )
+
+
+LAT_STEP_DEG = 0.0002  # ~22m per point at this latitude
+STEP_M = LAT_STEP_DEG * 111_320.0
+
+
+def make_candidate_with_geometry(
+    elevations: list[float],
+    lat_step: float = LAT_STEP_DEG,
+    longitude: float = -74.00,
+    # Only used when the geometry-based distance doesn't matter for the
+    # test in question -- pass None (the default) to derive distance_m
+    # from the geometry's own point count instead.
+    distance_m: float | None = None,
+) -> RouteCandidate:
+    geometry = tuple(
+        RoutePoint(
+            lat=40.70 + lat_step * index,
+            lon=longitude,
+            elevation_m=elevation,
+        )
+        for index, elevation in enumerate(elevations)
+    )
+
+    resolved_distance_m = (
+        distance_m
+        if distance_m is not None
+        else lat_step * 111_320.0 * (len(elevations) - 1)
+    )
+
+    return RouteCandidate(
+        geometry=geometry,
+        distance_m=resolved_distance_m,
+        # Deliberately wrong/unused raw total -- these tests exist to
+        # prove the geometry-based path ignores this field once there
+        # are >=2 points.
+        elevation_gain_m=999.0,
     )
 
 
@@ -293,6 +332,91 @@ def test_elevation_mismatch_norm_opposite_ends_is_one() -> None:
     )
 
     assert result == pytest.approx(1.0)
+
+
+def test_elevation_mismatch_norm_uses_smoothed_geometry_gain() -> None:
+    # 1000m route, flat except for a single-vertex DEM spike -- the raw
+    # elevation_gain_m field on the candidate is a deliberately wrong
+    # 999.0 (see make_candidate_with_geometry), so a result other than
+    # "opposite ends" (1.0) proves the geometry/smoothing path was
+    # actually used instead of the raw total.
+    elevations = [0.0] * 46
+    elevations[20] = 40.0  # isolated spike, smoothed away
+
+    candidate = make_candidate_with_geometry(elevations)
+
+    result = elevation_mismatch_norm(candidate, preferred_bucket="flat")
+
+    assert result == pytest.approx(0.0)
+
+
+def test_elevation_mismatch_norm_geometry_bucket_boundaries() -> None:
+    # A steady, monotonic climb over the whole route -- smoothed gain
+    # should land close to the raw total gain, so this exercises the
+    # geometry path landing in the "hilly" bucket against a "flat"
+    # preference (opposite ends -> 1.0), the same way the raw-total
+    # equivalent test already does for the <2-point fallback.
+    point_count = 46
+    total_gain = 40.0  # over ~1000m -> 40 m/km, well past the 25 cutoff
+    elevations = [
+        total_gain * (index / (point_count - 1))
+        for index in range(point_count)
+    ]
+
+    candidate = make_candidate_with_geometry(elevations)
+
+    result = elevation_mismatch_norm(candidate, preferred_bucket="flat")
+
+    assert result == pytest.approx(1.0)
+
+
+def test_elevation_mismatch_norm_flat_preference_with_real_climb_floors_at_half() -> None:  # noqa: E501
+    # A route whose net elevation change is ~0 (climbs back down to the
+    # start), but contains one real sustained climb in the middle --
+    # total/smoothed gain nets out "flat" per km, yet a "flat"
+    # preference shouldn't score this as a 0.0 mismatch, since the
+    # runner would still hit a real hill.
+    climb_grade_pct = 5.0
+    rise_per_point = STEP_M * (climb_grade_pct / 100.0)
+
+    elevations = [0.0] * 5
+
+    for _ in range(30):  # ~30*22=660m climb, comfortably over 200m/2%
+        elevations.append(elevations[-1] + rise_per_point)
+
+    for _ in range(30):  # descend back down to 0
+        elevations.append(elevations[-1] - rise_per_point)
+
+    elevations.extend([elevations[-1]] * 5)
+
+    candidate = make_candidate_with_geometry(elevations)
+
+    result = elevation_mismatch_norm(candidate, preferred_bucket="flat")
+
+    assert result == pytest.approx(0.5)
+
+
+def test_elevation_mismatch_norm_hilly_preference_without_climb_floors_at_half() -> None:  # noqa: E501
+    # Rolling/jittery elevation that nets a "hilly" per-km total but
+    # never sustains a single qualifying climb (small up/down wiggles,
+    # each too short and/or too shallow to pass MIN_CLIMB_LENGTH_M /
+    # MIN_CLIMB_GRADE_PCT) -- a "hilly" preference wants a real climb,
+    # not noise that happens to sum to a big total.
+    elevations = []
+    for index in range(46):
+        elevations.append(3.0 if index % 2 == 0 else 0.0)
+
+    candidate = make_candidate_with_geometry(elevations)
+
+    # Sanity: this jittery profile has no detected climbs, but does
+    # bucket as "hilly" against a "flat" preference (i.e. its smoothed
+    # per-km gain is nonzero) -- otherwise this test wouldn't isolate
+    # the intended floor.
+    assert detect_climbs(candidate.geometry) == []
+
+    result = elevation_mismatch_norm(candidate, preferred_bucket="hilly")
+
+    assert result == pytest.approx(0.5)
 
 
 def test_off_route_norm_zero_at_route() -> None:

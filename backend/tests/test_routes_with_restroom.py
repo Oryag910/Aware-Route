@@ -227,6 +227,11 @@ def test_routes_with_restroom_success() -> None:
         "sharp_turn_count",
         "u_turn_count",
         "compactness",
+        "smoothed_gain_m",
+        "climb_count",
+        "longest_climb_m",
+        "longest_climb_grade_pct",
+        "max_grade_pct",
     }
 
     assert route["distance_m"] == pytest.approx(2220.0)
