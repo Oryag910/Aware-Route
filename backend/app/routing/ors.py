@@ -1,4 +1,5 @@
 import os
+import time
 from typing import cast
 
 import httpx
@@ -12,6 +13,14 @@ ORS_URL = (
     "https://api.openrouteservice.org/"
     "v2/directions/foot-walking/geojson"
 )
+
+# The free tier allows ~40 requests/minute, and a request that lands
+# mid-burst can get a 429 that would otherwise abort an entire repair
+# chain -- one short retry converts most of those into successes.
+# Rejected (429) calls don't count against the quota.
+RATE_LIMIT_STATUS = 429
+RATE_LIMIT_MAX_RETRIES = 2
+RATE_LIMIT_BACKOFF_S = 2.0
 
 
 def extract_error_message(response: httpx.Response) -> str:
@@ -50,30 +59,43 @@ class OpenRouteServiceProvider:
             "Content-Type": "application/json",
         }
 
-        try:
-            response = httpx.post(
-                ORS_URL,
-                headers=headers,
-                json=body,
-                timeout=30.0,
-            )
-            response.raise_for_status()
+        for attempt in range(RATE_LIMIT_MAX_RETRIES + 1):
+            try:
+                response = httpx.post(
+                    ORS_URL,
+                    headers=headers,
+                    json=body,
+                    timeout=30.0,
+                )
+                response.raise_for_status()
 
-        except httpx.HTTPStatusError as exc:
-            status_code = exc.response.status_code
-            message = extract_error_message(exc.response)
+            except httpx.HTTPStatusError as exc:
+                status_code = exc.response.status_code
+                message = extract_error_message(exc.response)
 
-            if status_code in {400, 404}:
-                raise RouteNotFoundError(message) from exc
+                if (
+                    status_code == RATE_LIMIT_STATUS
+                    and attempt < RATE_LIMIT_MAX_RETRIES
+                ):
+                    time.sleep(RATE_LIMIT_BACKOFF_S)
+                    continue
 
-            raise RoutingProviderError(message) from exc
+                if status_code in {400, 404}:
+                    raise RouteNotFoundError(message) from exc
 
-        except httpx.RequestError as exc:
-            raise RoutingProviderError(
-                f"Could not connect to OpenRouteService: {exc}"
-            ) from exc
+                raise RoutingProviderError(message) from exc
 
-        return response
+            except httpx.RequestError as exc:
+                raise RoutingProviderError(
+                    f"Could not connect to OpenRouteService: {exc}"
+                ) from exc
+
+            return response
+
+        # Unreachable: the final attempt either returned or raised.
+        raise RoutingProviderError(
+            "OpenRouteService rate limit retries exhausted."
+        )
 
     def _parse_route_response(
         self,

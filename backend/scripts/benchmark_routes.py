@@ -17,9 +17,11 @@ MAX_ATTEMPTS_PER_REQUEST = 5
 
 # Each scenario now fires its ~20 ORS calls in parallel bursts rather
 # than one at a time, so back-to-back scenarios can blow the ~40/min
-# ORS free-tier quota. Pausing between scenarios keeps the benchmark's
-# response-time measurements free of rate-limit retry contamination.
-INTER_SCENARIO_SLEEP_S = 20.0
+# ORS free-tier quota. 35s spacing keeps any rolling one-minute window
+# at or under ~40 calls (20 per burst), so scenario results measure
+# the algorithm rather than quota contention -- 20s spacing was not
+# enough and produced unstable, repair-starved runs.
+INTER_SCENARIO_SLEEP_S = 35.0
 
 
 @dataclass(frozen=True)

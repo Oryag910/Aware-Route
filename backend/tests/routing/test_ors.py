@@ -233,3 +233,59 @@ def test_bad_key_raises_routing_provider_error(
         )
 
     assert "Access to this API has been disallowed" in str(error.value)
+
+
+def test_rate_limited_request_retries_then_succeeds(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fixture = load_fixture("round_trip_success.json")
+    responses = [
+        make_response(429, {"error": "Rate Limit Exceeded"}),
+        make_response(200, fixture),
+    ]
+
+    def fake_post(
+        *_args: object,
+        **_kwargs: object,
+    ) -> httpx.Response:
+        return responses.pop(0)
+
+    monkeypatch.setenv("ORS_API_KEY", "test-key")
+    monkeypatch.setattr("app.routing.ors.httpx.post", fake_post)
+    # Keep the test instant -- the backoff sleep is the retry's only
+    # side effect worth skipping.
+    monkeypatch.setattr("app.routing.ors.RATE_LIMIT_BACKOFF_S", 0.0)
+
+    provider = OpenRouteServiceProvider()
+
+    candidate = provider.get_loop(
+        start=Coordinate(lat=40.7128, lon=-74.0060),
+        target_distance_m=5000.0,
+        seed=1,
+    )
+
+    assert candidate.distance_m > 0
+    assert responses == []
+
+
+def test_rate_limited_request_raises_after_retries_exhausted(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fake_post(
+        *_args: object,
+        **_kwargs: object,
+    ) -> httpx.Response:
+        return make_response(429, {"error": "Rate Limit Exceeded"})
+
+    monkeypatch.setenv("ORS_API_KEY", "test-key")
+    monkeypatch.setattr("app.routing.ors.httpx.post", fake_post)
+    monkeypatch.setattr("app.routing.ors.RATE_LIMIT_BACKOFF_S", 0.0)
+
+    provider = OpenRouteServiceProvider()
+
+    with pytest.raises(RoutingProviderError):
+        provider.get_loop(
+            start=Coordinate(lat=40.7128, lon=-74.0060),
+            target_distance_m=5000.0,
+            seed=1,
+        )
