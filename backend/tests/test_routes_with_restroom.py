@@ -174,6 +174,9 @@ def test_routes_with_restroom_success() -> None:
             "restroom_max_mile": 1.0,
             "elevation_preference": "flat",
             "count": 1,
+            # Pinned inside make_restroom()'s "8:00 AM - 8:00 PM" so
+            # this test isn't flaky depending on wall-clock time.
+            "run_time": "2026-01-01T12:00:00",
         },
     )
 
@@ -247,6 +250,79 @@ def test_routes_with_restroom_success() -> None:
         1112.0,
         abs=5.0,
     )
+
+
+def test_routes_with_restroom_run_time_outside_hours_returns_422() -> None:
+    # The only restroom has hours 8:00 AM - 8:00 PM; a run_time of
+    # 11 PM excludes it before candidate generation even runs, so no
+    # candidate can match anything -- 422, not a silently empty match.
+    candidate = make_candidate()
+    restroom = make_restroom()
+
+    fake_provider = FakeRoutingProvider(candidate)
+
+    app.dependency_overrides[get_routing_provider] = (
+        lambda: fake_provider
+    )
+    app.dependency_overrides[get_eligible_restrooms] = (
+        lambda: [restroom]
+    )
+
+    response = client.post(
+        "/routes/with-restroom",
+        json={
+            "start_lat": 40.70,
+            "start_lon": -74.00,
+            "target_distance_m": 2220.0,
+            "restroom_min_mile": 0.5,
+            "restroom_max_mile": 1.0,
+            "elevation_preference": "flat",
+            "count": 1,
+            "run_time": "2026-01-01T23:00:00",
+        },
+    )
+
+    assert response.status_code == 422
+    assert response.json() == {
+        "detail": (
+            "No candidate route passed an eligible restroom in range"
+        )
+    }
+
+
+def test_routes_with_restroom_run_time_inside_hours_returns_200() -> None:  # noqa: E501
+    candidate = make_candidate()
+    restroom = make_restroom()
+
+    fake_provider = FakeRoutingProvider(candidate)
+
+    app.dependency_overrides[get_routing_provider] = (
+        lambda: fake_provider
+    )
+    app.dependency_overrides[get_eligible_restrooms] = (
+        lambda: [restroom]
+    )
+
+    response = client.post(
+        "/routes/with-restroom",
+        json={
+            "start_lat": 40.70,
+            "start_lon": -74.00,
+            "target_distance_m": 2220.0,
+            "restroom_min_mile": 0.5,
+            "restroom_max_mile": 1.0,
+            "elevation_preference": "flat",
+            "count": 1,
+            "run_time": "2026-01-01T12:00:00",
+        },
+    )
+
+    assert response.status_code == 200
+
+    body = response.json()
+
+    assert len(body) == 1
+    assert body[0]["matched"] is True
 
 
 def test_routes_with_restroom_returns_422_when_no_match() -> None:
@@ -325,6 +401,9 @@ def test_routes_with_restroom_backfills_with_fallback_when_understocked() -> Non
             "restroom_max_mile": 1.0,
             "elevation_preference": "flat",
             "count": 5,
+            # Pinned inside matched_restroom's "8:00 AM - 8:00 PM" so
+            # this test isn't flaky depending on wall-clock time.
+            "run_time": "2026-01-01T12:00:00",
         },
     )
 
@@ -392,6 +471,9 @@ def test_routes_with_restroom_count_slices_after_scoring() -> None:
             "restroom_max_mile": 1.0,
             "elevation_preference": "flat",
             "count": 1,
+            # Pinned inside matched_restroom's "8:00 AM - 8:00 PM" so
+            # this test isn't flaky depending on wall-clock time.
+            "run_time": "2026-01-01T12:00:00",
         },
     )
 
@@ -535,6 +617,9 @@ def test_restroom_first_generation_fixes_mile_range_error_blind_candidates_miss(
             "restroom_min_mile": 0.5,
             "restroom_max_mile": 1.0,
             "elevation_preference": "flat",
+            # Pinned inside good_restroom's "8:00 AM - 8:00 PM" so this
+            # test isn't flaky depending on wall-clock time.
+            "run_time": "2026-01-01T12:00:00",
             "count": 5,
         },
     )

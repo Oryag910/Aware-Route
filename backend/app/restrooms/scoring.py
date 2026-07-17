@@ -1,6 +1,10 @@
 from dataclasses import dataclass
 
-from app.restrooms.geo import RestroomMatch, match_restrooms_to_route
+from app.restrooms.geo import (
+    RESTROOM_PROXIMITY_THRESHOLD_M,
+    RestroomMatch,
+    match_restrooms_to_route,
+)
 from app.restrooms.models import Restroom
 from app.restrooms.repeated_segments import repeated_segment_ratio
 from app.restrooms.similarity import similarity_penalty_for_candidate
@@ -23,11 +27,15 @@ MAX_RESTROOM_RANGE_ERROR_M = 500.0
 # and mile_range_error are hard constraints instead of weighted factors.
 # 15:10:5:5 reduces to 3:2:1:1 (dividing by 5), and 3+2+1+1 = 7, so each
 # weight becomes its exact share of 7 — this preserves the original
-# relative ratios among the four remaining factors.
-WEIGHT_ELEVATION_MISMATCH = 3 / 7
-WEIGHT_REPEATED_SEGMENT = 2 / 7
-WEIGHT_SIMILARITY_PENALTY = 1 / 7
-WEIGHT_RESTROOM_CONFIDENCE = 1 / 7
+# relative ratios among the four remaining factors. Off-route
+# reachability was then added as a fifth factor at the same 1-part
+# weight as similarity/restroom-confidence, so the denominator grows
+# from 7 to 8 (3+2+1+1+1) and every weight is restated in eighths.
+WEIGHT_ELEVATION_MISMATCH = 3 / 8
+WEIGHT_REPEATED_SEGMENT = 2 / 8
+WEIGHT_SIMILARITY_PENALTY = 1 / 8
+WEIGHT_RESTROOM_CONFIDENCE = 1 / 8
+WEIGHT_OFF_ROUTE = 1 / 8
 
 # Fallback candidates (those failing a hard constraint) are ranked by
 # combined normalized distance+range error, weighted equally — a
@@ -35,6 +43,13 @@ WEIGHT_RESTROOM_CONFIDENCE = 1 / 7
 # was asked," not route-quality nuance.
 WEIGHT_FALLBACK_DISTANCE_ERROR = 0.5
 WEIGHT_FALLBACK_MILE_RANGE_ERROR = 0.5
+
+
+def off_route_norm(off_route_distance_m: float) -> float:
+    return min(
+        off_route_distance_m / RESTROOM_PROXIMITY_THRESHOLD_M,
+        1.0,
+    )
 
 
 def restroom_confidence(restroom: Restroom) -> float:
@@ -193,12 +208,14 @@ def _rank_matched(
         + WEIGHT_REPEATED_SEGMENT * partial.repeated_segment_ratio
         + WEIGHT_RESTROOM_CONFIDENCE
         * (1.0 - partial.restroom_confidence)
+        + WEIGHT_OFF_ROUTE
+        * off_route_norm(partial.off_route_distance_m)
         for partial in matched
     ]
 
-    # Similarity is computed against this provisional (3-factor) order
+    # Similarity is computed against this provisional (4-factor) order
     # rather than searching all orderings — similarity's own weight
-    # (1/7) is small enough that this approximation is reasonable.
+    # (1/8) is small enough that this approximation is reasonable.
     provisional_order = sorted(
         range(len(matched)),
         key=lambda index: subtotals[index],

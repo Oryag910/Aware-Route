@@ -1,8 +1,10 @@
+from datetime import datetime
 from typing import Annotated, Literal
 
 from fastapi import Depends, FastAPI, HTTPException
 from pydantic import BaseModel, Field
 
+from app.restrooms.hours import confidently_closed
 from app.restrooms.models import Restroom
 from app.restrooms.repository import (
     fetch_eligible_restrooms,
@@ -62,6 +64,10 @@ class RestroomRouteRequest(BaseModel):
     restroom_max_mile: Annotated[float, Field(gt=0)]
     elevation_preference: Literal["flat", "moderate", "hilly"]
     count: Annotated[int, Field(ge=1, le=5)] = 3
+    # A naive (no timezone) datetime is treated as local wall-clock
+    # time -- callers are expected to send local time, not UTC. None
+    # means "now".
+    run_time: datetime | None = None
 
 
 class RestroomInfo(BaseModel):
@@ -155,6 +161,16 @@ def get_routes_with_restroom(
     )
     min_mile_m = request.restroom_min_mile * 1609.34
     max_mile_m = request.restroom_max_mile * 1609.34
+    effective_run_time = request.run_time or datetime.now()
+
+    # Filtering here -- before restroom-first candidate selection,
+    # repair via waypoints, and scoring -- means one filter covers
+    # every downstream use of `restrooms`.
+    restrooms = [
+        restroom
+        for restroom in restrooms
+        if not confidently_closed(restroom, effective_run_time)
+    ]
 
     try:
         candidates = get_loop_candidates(

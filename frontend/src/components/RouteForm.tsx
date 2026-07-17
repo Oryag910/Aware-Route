@@ -7,6 +7,7 @@ export type RouteFormValues = {
   restroomMinMile: number;
   restroomMaxMile: number;
   elevationPreference: ElevationPreference;
+  runTime: string;
 };
 
 type RouteFormProps = {
@@ -25,6 +26,7 @@ export default function RouteForm({
   const [restroomMaxMile, setRestroomMaxMile] = useState("4");
   const [elevationPreference, setElevationPreference] =
     useState<ElevationPreference>("moderate");
+  const [runTime, setRunTime] = useState("");
 
   function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -34,6 +36,7 @@ export default function RouteForm({
       restroomMinMile: Number(restroomMinMile),
       restroomMaxMile: Number(restroomMaxMile),
       elevationPreference,
+      runTime,
     });
   }
 
@@ -93,6 +96,16 @@ export default function RouteForm({
           <option value="moderate">Moderate</option>
           <option value="hilly">Hilly</option>
         </select>
+      </div>
+
+      <div>
+        <label htmlFor="run-time">Run time (optional)</label>
+        <input
+          id="run-time"
+          type="datetime-local"
+          value={runTime}
+          onChange={(event) => setRunTime(event.target.value)}
+        />
       </div>
 
       <button

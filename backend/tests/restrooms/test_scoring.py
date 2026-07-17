@@ -1,14 +1,16 @@
 import pytest
 
-from app.restrooms.geo import RestroomMatch
+from app.restrooms.geo import RESTROOM_PROXIMITY_THRESHOLD_M, RestroomMatch
 from app.restrooms.models import Restroom
 from app.restrooms.scoring import (
+    WEIGHT_OFF_ROUTE,
     best_match_for_range,
     best_restroom_waypoint,
     elevation_bucket,
     elevation_mismatch_norm,
     mile_range_error_m,
     normalize_min_max,
+    off_route_norm,
     restroom_confidence,
     score_and_rank_candidates,
 )
@@ -285,6 +287,22 @@ def test_elevation_mismatch_norm_opposite_ends_is_one() -> None:
     assert result == pytest.approx(1.0)
 
 
+def test_off_route_norm_zero_at_route() -> None:
+    assert off_route_norm(0.0) == pytest.approx(0.0)
+
+
+def test_off_route_norm_scales_linearly_below_threshold() -> None:
+    result = off_route_norm(RESTROOM_PROXIMITY_THRESHOLD_M / 2.0)
+
+    assert result == pytest.approx(0.5)
+
+
+def test_off_route_norm_clamps_at_one() -> None:
+    result = off_route_norm(RESTROOM_PROXIMITY_THRESHOLD_M * 10.0)
+
+    assert result == pytest.approx(1.0)
+
+
 def test_normalize_min_max_empty_list() -> None:
     assert normalize_min_max([]) == []
 
@@ -406,13 +424,16 @@ def test_score_and_rank_candidates_splits_matched_and_fallback() -> None:
     assert scored_c.composite_score == pytest.approx(0.5)
 
     # b is the sole matched candidate: its composite score is the
-    # renormalized 4-factor formula, and since elevation/repeated-
-    # segment/similarity are all 0 and restroom_confidence is 0.5
-    # (identical across all three restrooms), b's composite collapses
-    # to just the restroom-confidence term.
-    #   composite = (3/7)*0 + (2/7)*0 + (1/7)*0 + (1/7)*(1 - 0.5)
-    #             = (1/7)*0.5 = 1/14
-    assert scored_b.composite_score == pytest.approx(1 / 14)
+    # renormalized 5-factor formula, and since elevation/repeated-
+    # segment/similarity/off-route are all 0 and restroom_confidence
+    # is 0.5 (identical across all three restrooms), b's composite
+    # collapses to just the restroom-confidence term. off_route_norm
+    # is 0 because the matched restroom sits exactly on the route
+    # (real match_restrooms_to_route(), not the make_match() fixture,
+    # is used here via score_and_rank_candidates()).
+    #   composite = (3/8)*0 + (2/8)*0 + (1/8)*0 + (1/8)*(1 - 0.5)
+    #             + (1/8)*0 = (1/8)*0.5 = 1/16
+    assert scored_b.composite_score == pytest.approx(1 / 16)
     assert scored_b.elevation_mismatch == pytest.approx(0.0)
     assert scored_b.repeated_segment_ratio == pytest.approx(0.0)
     assert scored_b.restroom_confidence == pytest.approx(0.5)
@@ -422,7 +443,7 @@ def test_score_and_rank_candidates_splits_matched_and_fallback() -> None:
 def test_score_and_rank_candidates_ranks_matched_pool_by_renormalized_composite() -> None:  # noqa: E501
     # Two candidates, both matched (small distance/range error), that
     # differ only in elevation_mismatch. This isolates the renormalized
-    # composite among a purely-matched pool, verifying the 3/7 weight
+    # composite among a purely-matched pool, verifying the 3/8 weight
     # on elevation_mismatch is applied as expected.
     flat_candidate = make_candidate_with_gain(
         elevation_gain_m=0.0,
@@ -461,19 +482,87 @@ def test_score_and_rank_candidates_ranks_matched_pool_by_renormalized_composite(
     # flat_candidate: gain_per_km=0 -> "flat" bucket -> mismatch 0.0
     # hilly_candidate: gain_per_km=40 -> "hilly" bucket -> mismatch 1.0
     # Both restroom_confidence=0.5, repeated_segment_ratio=0. Both
-    # candidates use make_candidate_with_gain()'s single-point geometry
-    # at the same lat/lon, so they are a 100% grid-cell overlap: the
-    # provisional order ranks flat first (lower subtotal), so hilly's
-    # similarity_penalty against the already-ranked flat geometry is
-    # 1.0 (full overlap), while flat -- ranked first, nothing above it
-    # -- gets 0.0.
-    #   flat:  (3/7)*0.0 + (1/7)*0.5 + (1/7)*0.0 = 1/14
-    #   hilly: (3/7)*1.0 + (1/7)*0.5 + (1/7)*1.0 = 3/7 + 1/14 + 1/7
-    #        = 6/14 + 1/14 + 2/14 = 9/14
-    assert scored_flat.composite_score == pytest.approx(1 / 14)
-    assert scored_hilly.composite_score == pytest.approx(9 / 14)
+    # candidates share the single restroom, sitting exactly on both
+    # candidates' single-point geometry, so off_route_norm=0.0 for
+    # both. Both candidates use make_candidate_with_gain()'s single-
+    # point geometry at the same lat/lon, so they are a 100% grid-cell
+    # overlap: the provisional order ranks flat first (lower subtotal),
+    # so hilly's similarity_penalty against the already-ranked flat
+    # geometry is 1.0 (full overlap), while flat -- ranked first,
+    # nothing above it -- gets 0.0.
+    #   flat:  (3/8)*0.0 + (1/8)*0.5 + (1/8)*0.0 + (1/8)*0.0 = 1/16
+    #   hilly: (3/8)*1.0 + (1/8)*0.5 + (1/8)*1.0 + (1/8)*0.0
+    #        = 3/8 + 1/16 + 1/8 = 6/16 + 1/16 + 2/16 = 9/16
+    assert scored_flat.composite_score == pytest.approx(1 / 16)
+    assert scored_hilly.composite_score == pytest.approx(9 / 16)
     assert scored_flat.similarity_penalty == pytest.approx(0.0)
     assert scored_hilly.similarity_penalty == pytest.approx(1.0)
+
+
+def test_score_and_rank_candidates_off_route_term_affects_matched_composite() -> None:  # noqa: E501
+    # Two candidates with identical shape/elevation/distance (just
+    # shifted apart in longitude so each only ever matches its own
+    # nearby restroom, and so they never overlap for similarity
+    # purposes), differing only in how far their restroom sits from
+    # the route -- isolates the new WEIGHT_OFF_ROUTE term in the
+    # matched-pool composite.
+    on_route_candidate = make_candidate(
+        start_lat=40.70,
+        longitude=-74.00,
+        distance_m=1000.0,
+    )
+    off_route_candidate = make_candidate(
+        start_lat=40.70,
+        longitude=-73.90,
+        distance_m=1000.0,
+    )
+
+    on_route_restroom = make_restroom(
+        source_id="on-route",
+        latitude=40.70,
+        longitude=-74.00,
+    )
+    # ~65m north of off_route_candidate's first geometry point --
+    # inside RESTROOM_PROXIMITY_THRESHOLD_M (130.0) so it still
+    # matches, but roughly half the threshold away, giving a
+    # non-trivial off_route_norm distinct from both 0.0 and 1.0.
+    off_route_restroom = make_restroom(
+        source_id="off-route",
+        latitude=40.70 + (65.0 / 111_320.0),
+        longitude=-73.90,
+    )
+
+    result = score_and_rank_candidates(
+        candidates=[off_route_candidate, on_route_candidate],
+        restrooms=[on_route_restroom, off_route_restroom],
+        target_distance_m=1000.0,
+        min_mile_m=0.0,
+        max_mile_m=100.0,
+        preferred_elevation_bucket="flat",
+    )
+
+    assert [scored.candidate for scored in result] == [
+        on_route_candidate,
+        off_route_candidate,
+    ]
+
+    scored_on_route, scored_off_route = result
+
+    assert scored_on_route.off_route_distance_m == pytest.approx(0.0)
+    assert scored_off_route.off_route_distance_m > 0.0
+
+    expected_off_route_norm = off_route_norm(
+        scored_off_route.off_route_distance_m
+    )
+
+    # Both candidates are identical in shape, so their only diverging
+    # composite input is off_route_norm -- similarity_penalty is 0.0
+    # for both (there's no higher-ranked geometry above either, since
+    # each is scored/ranked against a distinct restroom, not each
+    # other's geometry) and every other factor matches.
+    assert scored_off_route.composite_score - (
+        scored_on_route.composite_score
+    ) == pytest.approx(WEIGHT_OFF_ROUTE * expected_off_route_norm)
 
 
 def test_score_and_rank_candidates_backfills_with_fallback_when_understocked() -> None:  # noqa: E501

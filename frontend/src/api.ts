@@ -21,6 +21,7 @@ export type RankedRoute = {
   elevation_gain_m: number;
   restroom: RestroomInfo;
   matched: boolean;
+  off_route_distance_m: number;
   distance_error_m: number;
   mile_range_error_m: number;
   distance_error_norm: number;
@@ -46,19 +47,29 @@ export async function fetchRankedRoutes(
   startPosition: [number, number],
   values: RouteFormValues,
 ): Promise<RankedRoute[]> {
+  const body: Record<string, unknown> = {
+    start_lat: startPosition[0],
+    start_lon: startPosition[1],
+    target_distance_m: values.targetDistanceMiles * 1609.34,
+    restroom_min_mile: values.restroomMinMile,
+    restroom_max_mile: values.restroomMaxMile,
+    elevation_preference: values.elevationPreference,
+  };
+
+  // JSON.stringify drops keys whose value is undefined, so run_time
+  // is only set (and thus only sent) when the user actually picked a
+  // time -- an empty string means "not set," matching the other
+  // string-backed inputs in RouteForm.
+  if (values.runTime !== "") {
+    body.run_time = values.runTime;
+  }
+
   const response = await fetch("/api/routes/with-restroom", {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
     },
-    body: JSON.stringify({
-      start_lat: startPosition[0],
-      start_lon: startPosition[1],
-      target_distance_m: values.targetDistanceMiles * 1609.34,
-      restroom_min_mile: values.restroomMinMile,
-      restroom_max_mile: values.restroomMaxMile,
-      elevation_preference: values.elevationPreference,
-    }),
+    body: JSON.stringify(body),
   });
 
   if (!response.ok) {

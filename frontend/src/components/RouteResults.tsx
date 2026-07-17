@@ -26,6 +26,10 @@ export default function RouteResults({
           const restroomMile = (
             route.restroom.mile_marker_m / 1609.34
           ).toFixed(2);
+          const offRouteDistanceM = Math.round(
+            route.off_route_distance_m,
+          );
+          const isReachableOnRoute = route.off_route_distance_m <= 50;
 
           return (
             <button
@@ -86,6 +90,18 @@ export default function RouteResults({
               <p>
                 <strong>Restroom mile:</strong> {restroomMile}
               </p>
+
+              {isReachableOnRoute ? (
+                <p>
+                  <strong>Restroom:</strong> {offRouteDistanceM} m
+                  off-route
+                </p>
+              ) : (
+                <p style={{ color: "#854d0e" }}>
+                  <strong>Restroom:</strong> ~{offRouteDistanceM} m
+                  detour required
+                </p>
+              )}
 
               <p>
                 <strong>Elevation mismatch:</strong>{" "}
