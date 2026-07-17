@@ -142,7 +142,19 @@ def test_get_restroom_first_candidates_returns_one_per_selected_restroom() -> No
         limit=5,
     )
 
-    assert result == [candidate_a, candidate_b]
+    # mid is selected first (closest to the range midpoint), so it
+    # pairs with the first response; each entry keeps the restroom
+    # waypoint its route was built through.
+    assert [entry.candidate for entry in result] == [
+        candidate_a,
+        candidate_b,
+    ]
+    assert result[0].restroom_waypoint == Coordinate(
+        lat=mid.latitude, lon=mid.longitude
+    )
+    assert result[1].restroom_waypoint == Coordinate(
+        lat=near.latitude, lon=near.longitude
+    )
     assert len(provider.calls) == 2
 
 
@@ -171,5 +183,8 @@ def test_get_restroom_first_candidates_skips_unreachable_restrooms() -> None:
         limit=5,
     )
 
-    assert result == [candidate]
+    assert [entry.candidate for entry in result] == [candidate]
+    assert result[0].restroom_waypoint == Coordinate(
+        lat=near.latitude, lon=near.longitude
+    )
     assert len(provider.calls) == 2

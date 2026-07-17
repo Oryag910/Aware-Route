@@ -1,7 +1,19 @@
+from dataclasses import dataclass
+
 from app.restrooms.models import Restroom
 from app.routing.errors import RouteNotFoundError, RoutingProviderError
 from app.routing.geometry import haversine_m
 from app.routing.provider import Coordinate, RouteCandidate, RoutingProvider
+
+
+@dataclass(frozen=True)
+class RestroomFirstCandidate:
+    """A generated route plus the restroom waypoint it was built
+    through — kept together so later stages (e.g. distance repair) can
+    preserve the restroom when reshaping the route."""
+
+    candidate: RouteCandidate
+    restroom_waypoint: Coordinate
 
 
 def select_candidate_restrooms(
@@ -50,12 +62,12 @@ def get_restroom_first_candidates(
     min_mile_m: float,
     max_mile_m: float,
     limit: int,
-) -> list[RouteCandidate]:
+) -> list[RestroomFirstCandidate]:
     selected = select_candidate_restrooms(
         restrooms, start, min_mile_m, max_mile_m, limit
     )
 
-    candidates: list[RouteCandidate] = []
+    candidates: list[RestroomFirstCandidate] = []
 
     for restroom in selected:
         waypoint = Coordinate(
@@ -69,6 +81,10 @@ def get_restroom_first_candidates(
         except (RouteNotFoundError, RoutingProviderError):
             continue
 
-        candidates.append(candidate)
+        candidates.append(
+            RestroomFirstCandidate(
+                candidate=candidate, restroom_waypoint=waypoint
+            )
+        )
 
     return candidates

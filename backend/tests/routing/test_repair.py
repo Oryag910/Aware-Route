@@ -1,10 +1,12 @@
 import pytest
 
-from app.routing.errors import RouteNotFoundError
+from app.routing.errors import RouteNotFoundError, RoutingProviderError
 from app.routing.provider import Coordinate, RouteCandidate, RoutePoint
 from app.routing.repair import (
     MAX_DISTANCE_ERROR_M,
     NEAR_MISS_RATIO,
+    RESCUE_RATIO,
+    RepairTarget,
     repair_near_miss_candidates,
 )
 
@@ -12,10 +14,12 @@ from app.routing.repair import (
 START = Coordinate(lat=40.70, lon=-74.00)
 TARGET_DISTANCE_M = 2220.0
 
-# 0.15 * 2220.0 = 333.0 -- anything past this is "too far gone" per
-# NEAR_MISS_RATIO, anything within MAX_DISTANCE_ERROR_M (100.0) is
-# already accurate. The near-miss band is (100.0, 333.0].
+# 0.15 * 2220.0 = 333.0 -- the first repair pass covers errors in
+# (100.0, 333.0]. The rescue pass (only when nothing is within
+# tolerance) extends to 0.5 * 2220.0 = 1110.0. Beyond that a candidate
+# is never repaired.
 NEAR_MISS_UPPER_BOUND_M = NEAR_MISS_RATIO * TARGET_DISTANCE_M
+RESCUE_UPPER_BOUND_M = RESCUE_RATIO * TARGET_DISTANCE_M
 
 
 def make_candidate(distance_m: float) -> RouteCandidate:
@@ -28,6 +32,10 @@ def make_candidate(distance_m: float) -> RouteCandidate:
         distance_m=distance_m,
         elevation_gain_m=10.0,
     )
+
+
+def make_target(distance_m: float) -> RepairTarget:
+    return RepairTarget(candidate=make_candidate(distance_m))
 
 
 class FakeRepairProvider:
@@ -62,33 +70,33 @@ class FakeRepairProvider:
 
 
 def test_already_accurate_candidates_are_left_untouched() -> None:
-    candidate = make_candidate(TARGET_DISTANCE_M + MAX_DISTANCE_ERROR_M)
+    target = make_target(TARGET_DISTANCE_M + MAX_DISTANCE_ERROR_M)
     provider = FakeRepairProvider(waypoint_responses=[])
 
     result = repair_near_miss_candidates(
-        provider, [candidate], START, TARGET_DISTANCE_M
+        provider, [target], START, TARGET_DISTANCE_M
     )
 
-    assert result == [candidate]
+    assert result == [target.candidate]
     assert provider.calls == []
 
 
-def test_too_far_gone_candidates_are_left_untouched() -> None:
-    candidate = make_candidate(
-        TARGET_DISTANCE_M + NEAR_MISS_UPPER_BOUND_M + 1.0
+def test_beyond_rescue_ratio_candidates_are_never_repaired() -> None:
+    target = make_target(
+        TARGET_DISTANCE_M + RESCUE_UPPER_BOUND_M + 1.0
     )
     provider = FakeRepairProvider(waypoint_responses=[])
 
     result = repair_near_miss_candidates(
-        provider, [candidate], START, TARGET_DISTANCE_M
+        provider, [target], START, TARGET_DISTANCE_M
     )
 
-    assert result == [candidate]
+    assert result == [target.candidate]
     assert provider.calls == []
 
 
 def test_near_miss_candidate_is_corrected_when_first_attempt_converges() -> None:  # noqa: E501
-    near_miss = make_candidate(TARGET_DISTANCE_M + 200.0)
+    near_miss = make_target(TARGET_DISTANCE_M + 200.0)
     corrected = make_candidate(TARGET_DISTANCE_M)
     provider = FakeRepairProvider(waypoint_responses=[corrected])
 
@@ -101,36 +109,23 @@ def test_near_miss_candidate_is_corrected_when_first_attempt_converges() -> None
     assert len(provider.calls) == 1
 
 
-def test_repair_keeps_the_best_attempt_across_rounds() -> None:
-    near_miss = make_candidate(TARGET_DISTANCE_M + 200.0)
-    # None of the 3 attempts (MAX_REPAIR_ROUNDS) hits the ±100m
-    # constraint, so repair runs all 3 rounds -- it should keep
-    # whichever attempt had the smallest error overall (the second),
-    # not just the last one that happened to run.
+def test_repair_keeps_the_best_attempt_across_rounds_and_anchors() -> None:
+    near_miss = make_target(TARGET_DISTANCE_M + 200.0)
+    # None of the attempts hits the ±100m constraint. The first anchor
+    # burns its 3 rounds (worse/better/final), then the fallback anchor
+    # gets the remaining 1 call of the 4-call per-candidate cap. Repair
+    # must keep the best attempt overall (the second), not the last.
     worse_attempt = make_candidate(TARGET_DISTANCE_M + 150.0)
     better_attempt = make_candidate(TARGET_DISTANCE_M + 120.0)
     final_attempt = make_candidate(TARGET_DISTANCE_M + 140.0)
-
-    provider = FakeRepairProvider(
-        waypoint_responses=[worse_attempt, better_attempt, final_attempt]
-    )
-
-    result = repair_near_miss_candidates(
-        provider, [near_miss], START, TARGET_DISTANCE_M
-    )
-
-    assert result == [better_attempt]
-    assert len(provider.calls) == 3
-
-
-def test_route_not_found_mid_repair_falls_back_to_best_so_far() -> None:
-    near_miss = make_candidate(TARGET_DISTANCE_M + 200.0)
-    first_attempt = make_candidate(TARGET_DISTANCE_M + 120.0)
+    fallback_anchor_attempt = make_candidate(TARGET_DISTANCE_M + 300.0)
 
     provider = FakeRepairProvider(
         waypoint_responses=[
-            first_attempt,
-            RouteNotFoundError("no route for this waypoint set"),
+            worse_attempt,
+            better_attempt,
+            final_attempt,
+            fallback_anchor_attempt,
         ]
     )
 
@@ -138,24 +133,42 @@ def test_route_not_found_mid_repair_falls_back_to_best_so_far() -> None:
         provider, [near_miss], START, TARGET_DISTANCE_M
     )
 
-    # Repair must not raise -- it should just stop and keep the best
-    # candidate found before the failure.
-    assert result == [first_attempt]
+    assert result == [better_attempt]
+    assert len(provider.calls) == 4
 
 
-def test_shared_budget_is_spent_across_multiple_near_miss_candidates(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setattr(
-        "app.routing.repair.MAX_REPAIR_CALLS_PER_REQUEST", 1
+def test_unroutable_anchor_falls_back_to_next_anchor() -> None:
+    near_miss = make_target(TARGET_DISTANCE_M + 200.0)
+    corrected = make_candidate(TARGET_DISTANCE_M)
+
+    # The first (furthest-point) anchor is unroutable -- e.g. nudged
+    # into water. Repair should move to the fallback anchor rather
+    # than abandoning the candidate.
+    provider = FakeRepairProvider(
+        waypoint_responses=[
+            RouteNotFoundError("no route for this waypoint set"),
+            corrected,
+        ]
     )
 
-    first_near_miss = make_candidate(TARGET_DISTANCE_M + 200.0)
-    second_near_miss = make_candidate(TARGET_DISTANCE_M + 250.0)
+    result = repair_near_miss_candidates(
+        provider, [near_miss], START, TARGET_DISTANCE_M
+    )
 
-    first_attempt = make_candidate(TARGET_DISTANCE_M + 150.0)
+    assert result == [corrected]
+    assert len(provider.calls) == 2
 
-    provider = FakeRepairProvider(waypoint_responses=[first_attempt])
+
+def test_provider_error_halts_repair_for_the_whole_request() -> None:
+    first_near_miss = make_target(TARGET_DISTANCE_M + 200.0)
+    second_near_miss = make_target(TARGET_DISTANCE_M + 250.0)
+
+    # A provider-level failure (rate limit, outage) on the first
+    # candidate must stop repair spending entirely -- the second
+    # candidate stays untouched even though budget remains.
+    provider = FakeRepairProvider(
+        waypoint_responses=[RoutingProviderError("rate limited")]
+    )
 
     result = repair_near_miss_candidates(
         provider,
@@ -164,7 +177,93 @@ def test_shared_budget_is_spent_across_multiple_near_miss_candidates(
         TARGET_DISTANCE_M,
     )
 
-    # Only 1 call in the shared budget -- spent on the first candidate,
-    # leaving the second untouched.
-    assert result == [first_attempt, second_near_miss]
+    assert result == [
+        first_near_miss.candidate,
+        second_near_miss.candidate,
+    ]
     assert len(provider.calls) == 1
+
+
+def test_shared_budget_is_spent_on_most_promising_candidate_first(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "app.routing.repair.MAX_REPAIR_CALLS_PER_REQUEST", 1
+    )
+
+    # Listed worse-first: repair must still spend its single call on
+    # the *closer* candidate (smallest error), not the first in list
+    # order.
+    further_near_miss = make_target(TARGET_DISTANCE_M + 250.0)
+    closer_near_miss = make_target(TARGET_DISTANCE_M + 200.0)
+
+    attempt = make_candidate(TARGET_DISTANCE_M + 150.0)
+
+    provider = FakeRepairProvider(waypoint_responses=[attempt])
+
+    result = repair_near_miss_candidates(
+        provider,
+        [further_near_miss, closer_near_miss],
+        START,
+        TARGET_DISTANCE_M,
+    )
+
+    # The single call went to closer_near_miss (improved to +150.0);
+    # further_near_miss is untouched.
+    assert result == [further_near_miss.candidate, attempt]
+    assert len(provider.calls) == 1
+
+
+def test_rescue_pass_repairs_moderate_misses_when_nothing_matches() -> None:
+    # Error 400.0 is past the near-miss band (333.0) but inside the
+    # rescue band (1110.0). With no candidate within tolerance, the
+    # rescue pass must still try to fix it -- this is the Battery
+    # Park scenario where every candidate misses badly.
+    moderate_miss = make_target(TARGET_DISTANCE_M + 400.0)
+    corrected = make_candidate(TARGET_DISTANCE_M)
+    provider = FakeRepairProvider(waypoint_responses=[corrected])
+
+    result = repair_near_miss_candidates(
+        provider, [moderate_miss], START, TARGET_DISTANCE_M
+    )
+
+    assert result == [corrected]
+    assert len(provider.calls) == 1
+
+
+def test_rescue_pass_is_skipped_when_a_candidate_already_matches() -> None:
+    accurate = make_target(TARGET_DISTANCE_M + 50.0)
+    moderate_miss = make_target(TARGET_DISTANCE_M + 400.0)
+    provider = FakeRepairProvider(waypoint_responses=[])
+
+    result = repair_near_miss_candidates(
+        provider, [accurate, moderate_miss], START, TARGET_DISTANCE_M
+    )
+
+    # A candidate already satisfies the distance constraint, so no
+    # repair calls are spent widening eligibility.
+    assert result == [accurate.candidate, moderate_miss.candidate]
+    assert provider.calls == []
+
+
+def test_repair_preserves_via_waypoint_for_restroom_first_candidates() -> None:  # noqa: E501
+    restroom_waypoint = Coordinate(lat=40.715, lon=-74.005)
+    near_miss = RepairTarget(
+        candidate=make_candidate(TARGET_DISTANCE_M + 200.0),
+        via=restroom_waypoint,
+    )
+    corrected = make_candidate(TARGET_DISTANCE_M)
+    provider = FakeRepairProvider(waypoint_responses=[corrected])
+
+    result = repair_near_miss_candidates(
+        provider, [near_miss], START, TARGET_DISTANCE_M
+    )
+
+    assert result == [corrected]
+    # The repair call must route start -> restroom -> anchor -> start,
+    # keeping the restroom the candidate was built around.
+    assert len(provider.calls) == 1
+    assert provider.calls[0][0] == START
+    assert provider.calls[0][1] == restroom_waypoint
+    assert provider.calls[0][-1] == START
+    assert len(provider.calls[0]) == 4

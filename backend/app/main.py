@@ -16,7 +16,7 @@ from app.routing.errors import (
     RouteNotFoundError,
     RoutingProviderError
 )
-from app.routing.repair import repair_near_miss_candidates
+from app.routing.repair import RepairTarget, repair_near_miss_candidates
 from app.routing.provider import (
     Coordinate,
     RouteCandidate,
@@ -168,7 +168,7 @@ def get_routes_with_restroom(
             detail=str(exc),
         ) from exc
 
-    candidates = candidates + get_restroom_first_candidates(
+    restroom_first = get_restroom_first_candidates(
         provider,
         start,
         restrooms,
@@ -177,9 +177,21 @@ def get_routes_with_restroom(
         RESTROOM_FIRST_CANDIDATE_LIMIT,
     )
 
+    # Restroom-first candidates carry their restroom as a via waypoint
+    # so repair can fix distance without dropping the restroom the
+    # route was built around; blind candidates have no such anchor.
+    repair_targets = [
+        RepairTarget(candidate=candidate) for candidate in candidates
+    ] + [
+        RepairTarget(
+            candidate=entry.candidate, via=entry.restroom_waypoint
+        )
+        for entry in restroom_first
+    ]
+
     candidates = repair_near_miss_candidates(
         provider,
-        candidates,
+        repair_targets,
         start,
         request.target_distance_m,
     )

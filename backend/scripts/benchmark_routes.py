@@ -1,6 +1,9 @@
+import json
 import statistics
 import time
 from dataclasses import dataclass
+from datetime import datetime
+from pathlib import Path
 from typing import cast
 
 import httpx
@@ -246,6 +249,50 @@ def print_summary(results: list[ScenarioResult]) -> None:
             print(f"    error: {result.error}")
 
 
+RESULTS_DIR = Path(__file__).resolve().parent.parent / "benchmarks"
+
+
+def save_results(results: list[ScenarioResult]) -> Path:
+    successful = [result for result in results if result.status_code == 200]
+    with_match = [result for result in successful if result.matched_count > 0]
+    response_times = [result.response_time_s for result in results]
+
+    payload: dict[str, object] = {
+        "run_at": datetime.now().isoformat(timespec="seconds"),
+        "summary": {
+            "scenarios_run": len(results),
+            "successful": len(successful),
+            "with_matched_result": len(with_match),
+            "median_response_time_s": (
+                round(statistics.median(response_times), 2)
+                if response_times
+                else None
+            ),
+        },
+        "scenarios": [
+            {
+                "name": result.scenario.name,
+                "status_code": result.status_code,
+                "matched_count": result.matched_count,
+                "returned_count": result.returned_count,
+                "best_distance_error_m": result.best_distance_error_m,
+                "best_mile_range_error_m": result.best_mile_range_error_m,
+                "response_time_s": round(result.response_time_s, 2),
+                "error": result.error,
+            }
+            for result in results
+        ],
+    }
+
+    RESULTS_DIR.mkdir(exist_ok=True)
+    output_path = RESULTS_DIR / (
+        f"benchmark_{datetime.now():%Y%m%d_%H%M%S}.json"
+    )
+    output_path.write_text(json.dumps(payload, indent=2) + "\n")
+
+    return output_path
+
+
 def main() -> None:
     results: list[ScenarioResult] = []
 
@@ -261,6 +308,8 @@ def main() -> None:
         )
 
     print_summary(results)
+    output_path = save_results(results)
+    print(f"\nResults saved to {output_path}")
 
 
 if __name__ == "__main__":
