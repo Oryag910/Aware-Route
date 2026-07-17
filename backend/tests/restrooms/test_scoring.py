@@ -4,6 +4,7 @@ from app.restrooms.geo import RestroomMatch
 from app.restrooms.models import Restroom
 from app.restrooms.scoring import (
     best_match_for_range,
+    best_restroom_waypoint,
     elevation_bucket,
     elevation_mismatch_norm,
     mile_range_error_m,
@@ -11,7 +12,7 @@ from app.restrooms.scoring import (
     restroom_confidence,
     score_and_rank_candidates,
 )
-from app.routing.provider import RouteCandidate, RoutePoint
+from app.routing.provider import Coordinate, RouteCandidate, RoutePoint
 
 
 def make_restroom(
@@ -552,3 +553,36 @@ def test_score_and_rank_candidates_off_route_distance_m_surfaces_match_field() -
     assert result[0].off_route_distance_m == pytest.approx(
         result[0].restroom_match.distance_to_route_m
     )
+
+def test_best_restroom_waypoint_returns_matched_restroom_coordinate() -> None:  # noqa: E501
+    candidate = make_candidate(
+        start_lat=40.70, longitude=-74.00, distance_m=2220.0
+    )
+    # Sits on the candidate's second geometry point -- well within the
+    # proximity threshold, mile marker ~1112m.
+    restroom = make_restroom(
+        source_id="on-route", latitude=40.71, longitude=-74.00
+    )
+
+    waypoint = best_restroom_waypoint(
+        candidate, [restroom], min_mile_m=800.0, max_mile_m=1600.0
+    )
+
+    assert waypoint == Coordinate(lat=40.71, lon=-74.00)
+
+
+def test_best_restroom_waypoint_returns_none_without_a_match() -> None:
+    candidate = make_candidate(
+        start_lat=40.70, longitude=-74.00, distance_m=2220.0
+    )
+    # ~0.1 degrees of longitude (~8.4km) off the route -- far beyond
+    # the proximity threshold.
+    restroom = make_restroom(
+        source_id="far-away", latitude=40.71, longitude=-74.10
+    )
+
+    waypoint = best_restroom_waypoint(
+        candidate, [restroom], min_mile_m=800.0, max_mile_m=1600.0
+    )
+
+    assert waypoint is None

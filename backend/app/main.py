@@ -8,7 +8,10 @@ from app.restrooms.repository import (
     fetch_eligible_restrooms,
     get_supabase_client,
 )
-from app.restrooms.scoring import score_and_rank_candidates
+from app.restrooms.scoring import (
+    best_restroom_waypoint,
+    score_and_rank_candidates,
+)
 from app.restrooms.waypoint_candidates import get_restroom_first_candidates
 from app.routing.candidates import get_loop_candidates
 from app.routing.ors import OpenRouteServiceProvider
@@ -177,11 +180,19 @@ def get_routes_with_restroom(
         RESTROOM_FIRST_CANDIDATE_LIMIT,
     )
 
-    # Restroom-first candidates carry their restroom as a via waypoint
-    # so repair can fix distance without dropping the restroom the
-    # route was built around; blind candidates have no such anchor.
+    # Every repair target carries a restroom as a via waypoint so
+    # fixing distance can't silently drop the restroom: restroom-first
+    # candidates keep the one they were built through, and blind
+    # candidates pin whichever restroom scoring would match them to
+    # (if any).
     repair_targets = [
-        RepairTarget(candidate=candidate) for candidate in candidates
+        RepairTarget(
+            candidate=candidate,
+            via=best_restroom_waypoint(
+                candidate, restrooms, min_mile_m, max_mile_m
+            ),
+        )
+        for candidate in candidates
     ] + [
         RepairTarget(
             candidate=entry.candidate, via=entry.restroom_waypoint
@@ -189,12 +200,21 @@ def get_routes_with_restroom(
         for entry in restroom_first
     ]
 
-    candidates = repair_near_miss_candidates(
+    repaired = repair_near_miss_candidates(
         provider,
         repair_targets,
         start,
         request.target_distance_m,
     )
+
+    # Keep originals alongside their repaired versions rather than
+    # replacing them -- a repaired route can win on distance yet lose
+    # restroom placement, so scoring should get to pick from both.
+    candidates = [target.candidate for target in repair_targets] + [
+        candidate
+        for candidate, target in zip(repaired, repair_targets)
+        if candidate is not target.candidate
+    ]
 
     scored_candidates = score_and_rank_candidates(
         candidates,

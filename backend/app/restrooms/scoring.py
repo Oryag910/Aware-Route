@@ -4,7 +4,7 @@ from app.restrooms.geo import RestroomMatch, match_restrooms_to_route
 from app.restrooms.models import Restroom
 from app.restrooms.repeated_segments import repeated_segment_ratio
 from app.restrooms.similarity import similarity_penalty_for_candidate
-from app.routing.provider import RouteCandidate, RoutePoint
+from app.routing.provider import Coordinate, RouteCandidate, RoutePoint
 from app.routing.repair import MAX_DISTANCE_ERROR_M
 
 
@@ -106,6 +106,29 @@ def best_match_for_range(
             min_mile_m,
             max_mile_m,
         ),
+    )
+
+
+def best_restroom_waypoint(
+    candidate: RouteCandidate,
+    restrooms: list[Restroom],
+    min_mile_m: float,
+    max_mile_m: float,
+) -> Coordinate | None:
+    """The restroom a candidate would be scored against, as a repair
+    via waypoint — distance repair reshapes a loop into an out-and-back
+    through a nudged anchor, and without pinning the restroom the
+    reshaped route routinely loses it (fixing one hard constraint by
+    breaking the other)."""
+    matches = match_restrooms_to_route(candidate.geometry, restrooms)
+    best = best_match_for_range(matches, min_mile_m, max_mile_m)
+
+    if best is None:
+        return None
+
+    return Coordinate(
+        lat=best.restroom.latitude,
+        lon=best.restroom.longitude,
     )
 
 
