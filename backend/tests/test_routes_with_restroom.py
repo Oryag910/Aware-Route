@@ -3,9 +3,11 @@ from collections.abc import Iterator
 import pytest
 from fastapi.testclient import TestClient
 
+from app.flow.interruptions import InterruptionStore
 from app.main import (
     app,
     get_eligible_restrooms,
+    get_interruption_store,
     get_routing_provider,
 )
 from app.restrooms.models import Restroom
@@ -17,6 +19,10 @@ from app.routing.provider import (
 
 
 client = TestClient(app)
+
+EMPTY_INTERRUPTION_STORE = InterruptionStore(
+    signals=(), crossings=(), signal_cell_index={}, crossing_cell_index={}
+)
 
 
 class FakeRoutingProvider:
@@ -80,6 +86,14 @@ class SingleSeedRoutingProvider:
 @pytest.fixture(autouse=True)
 def clear_dependency_overrides() -> Iterator[None]:
     app.dependency_overrides.clear()
+
+    # Every test in this module is offline -- override with an empty
+    # store so route_interruptions() never touches the real (large)
+    # data/interruptions.json file the lazy singleton would otherwise
+    # load.
+    app.dependency_overrides[get_interruption_store] = (
+        lambda: EMPTY_INTERRUPTION_STORE
+    )
 
     yield
 
@@ -204,6 +218,12 @@ def test_routes_with_restroom_success() -> None:
         "restroom_confidence",
         "similarity_penalty",
         "composite_score",
+        "signal_count",
+        "crossing_count",
+        "longest_uninterrupted_m",
+        "signals_per_km",
+        "pedestrian_path_ratio",
+        "contains_stairs",
     }
 
     assert route["distance_m"] == pytest.approx(2220.0)
@@ -219,6 +239,15 @@ def test_routes_with_restroom_success() -> None:
     assert route["restroom_confidence"] == pytest.approx(1.0)
     assert route["similarity_penalty"] == pytest.approx(0.0)
     assert route["composite_score"] == pytest.approx(0.0)
+    # The autouse fixture overrides get_interruption_store with an
+    # empty store, and FakeRoutingProvider's candidate carries no
+    # extras (ORS extra_info parsing is exercised in test_ors.py, not
+    # here).
+    assert route["signal_count"] == 0
+    assert route["crossing_count"] == 0
+    assert route["signals_per_km"] == pytest.approx(0.0)
+    assert route["pedestrian_path_ratio"] == pytest.approx(0.0)
+    assert route["contains_stairs"] is False
 
     assert len(route["geometry"]) == 3
     assert route["geometry"][0]["lat"] == pytest.approx(40.70)

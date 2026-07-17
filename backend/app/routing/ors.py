@@ -6,7 +6,12 @@ import httpx
 from dotenv import load_dotenv
 
 from app.routing.errors import RouteNotFoundError, RoutingProviderError
-from app.routing.provider import Coordinate, RouteCandidate, RoutePoint
+from app.routing.provider import (
+    Coordinate,
+    RouteCandidate,
+    RouteExtras,
+    RoutePoint,
+)
 
 
 ORS_URL = (
@@ -46,6 +51,39 @@ def extract_error_message(response: httpx.Response) -> str:
             return error_body
 
     return response.text or f"ORS returned HTTP {response.status_code}"
+
+
+def _parse_extras(properties: dict[str, object]) -> RouteExtras | None:
+    """Parses properties["extras"] (present only when the request asked
+    for extra_info). Tolerates a missing "extras" key entirely, and
+    tolerates any of waytype/surface/steepness being absent within it --
+    the existing fixtures have no extras block and must still parse."""
+    raw_extras = properties.get("extras")
+
+    if not isinstance(raw_extras, dict):
+        return None
+
+    def segments_for(key: str) -> tuple[tuple[int, int, int], ...]:
+        entry = raw_extras.get(key)
+
+        if not isinstance(entry, dict):
+            return ()
+
+        raw_values = entry.get("values")
+
+        if not isinstance(raw_values, list):
+            return ()
+
+        return tuple(
+            (int(value[0]), int(value[1]), int(value[2]))
+            for value in cast(list[list[int | float]], raw_values)
+        )
+
+    return RouteExtras(
+        waytype_segments=segments_for("waytype"),
+        surface_segments=segments_for("surface"),
+        steepness_segments=segments_for("steepness"),
+    )
 
 
 class OpenRouteServiceProvider:
@@ -153,6 +191,8 @@ class OpenRouteServiceProvider:
                 for coordinate in raw_coordinates
             )
 
+            extras = _parse_extras(properties)
+
         except RouteNotFoundError:
             raise
 
@@ -165,6 +205,7 @@ class OpenRouteServiceProvider:
             geometry=geometry,
             distance_m=distance_m,
             elevation_gain_m=elevation_gain_m,
+            extras=extras,
         )
 
     def get_loop(
@@ -176,6 +217,7 @@ class OpenRouteServiceProvider:
         body: dict[str, object] = {
             "coordinates": [[start.lon, start.lat]],
             "elevation": True,
+            "extra_info": ["surface", "waytype", "steepness"],
             "options": {
                 "round_trip": {
                     "length": target_distance_m,
@@ -197,6 +239,7 @@ class OpenRouteServiceProvider:
                 [waypoint.lon, waypoint.lat] for waypoint in waypoints
             ],
             "elevation": True,
+            "extra_info": ["surface", "waytype", "steepness"],
         }
 
         response = self._send_request(body)

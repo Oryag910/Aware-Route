@@ -31,6 +31,12 @@ export type RankedRoute = {
   restroom_confidence: number;
   similarity_penalty: number;
   composite_score: number;
+  signal_count: number;
+  crossing_count: number;
+  longest_uninterrupted_m: number;
+  signals_per_km: number;
+  pedestrian_path_ratio: number;
+  contains_stairs: boolean;
 };
 
 export class ApiError extends Error {

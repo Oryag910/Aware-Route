@@ -1,5 +1,7 @@
 from dataclasses import dataclass
 
+from app.flow.interruptions import InterruptionStore, route_interruptions
+from app.flow.surfaces import contains_stairs, pedestrian_path_ratio
 from app.restrooms.geo import (
     RESTROOM_PROXIMITY_THRESHOLD_M,
     RestroomMatch,
@@ -23,6 +25,11 @@ BUCKET_ORDER = ("flat", "moderate", "hilly")
 
 MAX_RESTROOM_RANGE_ERROR_M = 500.0
 
+# Manhattan-grid-worst-case ceiling for signals_per_km -- used to
+# normalize interruption density into [0, 1] alongside the other
+# composite factors.
+SIGNALS_PER_KM_CEILING = 8.0
+
 # Renormalized from the original 15:10:5:5 ratio now that distance_error
 # and mile_range_error are hard constraints instead of weighted factors.
 # 15:10:5:5 reduces to 3:2:1:1 (dividing by 5), and 3+2+1+1 = 7, so each
@@ -31,11 +38,22 @@ MAX_RESTROOM_RANGE_ERROR_M = 500.0
 # reachability was then added as a fifth factor at the same 1-part
 # weight as similarity/restroom-confidence, so the denominator grows
 # from 7 to 8 (3+2+1+1+1) and every weight is restated in eighths.
-WEIGHT_ELEVATION_MISMATCH = 3 / 8
-WEIGHT_REPEATED_SEGMENT = 2 / 8
-WEIGHT_SIMILARITY_PENALTY = 1 / 8
-WEIGHT_RESTROOM_CONFIDENCE = 1 / 8
-WEIGHT_OFF_ROUTE = 1 / 8
+# Interruption density (traffic-signal frequency) was then added as a
+# sixth factor at a 2-part weight -- on par with repeated_segment,
+# since both are route-quality signals rather than restroom-fit
+# signals -- so the ratio becomes 3:2:2:1:1:1 and the denominator grows
+# from 8 to 10 (3+2+2+1+1+1), restating every weight in tenths.
+# Crossing counts are reported but deliberately not scored -- OSM's
+# crossing tagging is too noisy/inconsistent across boroughs to trust
+# as a quality signal (many real crossings are untagged or tagged
+# without a recognizable pattern), unlike traffic_signals which is
+# reliably tagged.
+WEIGHT_ELEVATION_MISMATCH = 3 / 10
+WEIGHT_REPEATED_SEGMENT = 2 / 10
+WEIGHT_INTERRUPTION = 2 / 10
+WEIGHT_SIMILARITY_PENALTY = 1 / 10
+WEIGHT_RESTROOM_CONFIDENCE = 1 / 10
+WEIGHT_OFF_ROUTE = 1 / 10
 
 # Fallback candidates (those failing a hard constraint) are ranked by
 # combined normalized distance+range error, weighted equally — a
@@ -50,6 +68,10 @@ def off_route_norm(off_route_distance_m: float) -> float:
         off_route_distance_m / RESTROOM_PROXIMITY_THRESHOLD_M,
         1.0,
     )
+
+
+def interruption_norm(signals_per_km: float) -> float:
+    return min(signals_per_km / SIGNALS_PER_KM_CEILING, 1.0)
 
 
 def restroom_confidence(restroom: Restroom) -> float:
@@ -174,6 +196,12 @@ class _PartialScore:
     repeated_segment_ratio: float
     elevation_mismatch: float
     restroom_confidence: float
+    signal_count: int
+    crossing_count: int
+    longest_uninterrupted_m: float
+    signals_per_km: float
+    pedestrian_path_ratio: float
+    contains_stairs: bool
 
 
 @dataclass(frozen=True)
@@ -191,6 +219,12 @@ class ScoredCandidate:
     restroom_confidence: float
     similarity_penalty: float
     composite_score: float
+    signal_count: int
+    crossing_count: int
+    longest_uninterrupted_m: float
+    signals_per_km: float
+    pedestrian_path_ratio: float
+    contains_stairs: bool
 
 
 def _rank_matched(
@@ -206,6 +240,8 @@ def _rank_matched(
     subtotals = [
         WEIGHT_ELEVATION_MISMATCH * partial.elevation_mismatch
         + WEIGHT_REPEATED_SEGMENT * partial.repeated_segment_ratio
+        + WEIGHT_INTERRUPTION
+        * interruption_norm(partial.signals_per_km)
         + WEIGHT_RESTROOM_CONFIDENCE
         * (1.0 - partial.restroom_confidence)
         + WEIGHT_OFF_ROUTE
@@ -253,6 +289,12 @@ def _rank_matched(
                 + WEIGHT_SIMILARITY_PENALTY
                 * similarity_penalties[index]
             ),
+            signal_count=partial.signal_count,
+            crossing_count=partial.crossing_count,
+            longest_uninterrupted_m=partial.longest_uninterrupted_m,
+            signals_per_km=partial.signals_per_km,
+            pedestrian_path_ratio=partial.pedestrian_path_ratio,
+            contains_stairs=partial.contains_stairs,
         )
         for index, partial in enumerate(matched)
     ]
@@ -293,6 +335,12 @@ def _rank_fallback(
                 + WEIGHT_FALLBACK_MILE_RANGE_ERROR
                 * mile_range_error_norms[index]
             ),
+            signal_count=partial.signal_count,
+            crossing_count=partial.crossing_count,
+            longest_uninterrupted_m=partial.longest_uninterrupted_m,
+            signals_per_km=partial.signals_per_km,
+            pedestrian_path_ratio=partial.pedestrian_path_ratio,
+            contains_stairs=partial.contains_stairs,
         )
         for index, partial in enumerate(fallback)
     ]
@@ -311,6 +359,7 @@ def score_and_rank_candidates(
     min_mile_m: float,
     max_mile_m: float,
     preferred_elevation_bucket: str,
+    interruption_store: InterruptionStore,
 ) -> list[ScoredCandidate]:
     partial_scores: list[_PartialScore] = []
 
@@ -339,6 +388,11 @@ def score_and_rank_candidates(
             max_mile_m,
         )
 
+        interruptions = route_interruptions(
+            candidate.geometry,
+            interruption_store,
+        )
+
         partial_scores.append(
             _PartialScore(
                 candidate=candidate,
@@ -359,6 +413,20 @@ def score_and_rank_candidates(
                 ),
                 restroom_confidence=restroom_confidence(
                     best_match.restroom
+                ),
+                signal_count=interruptions.signal_count,
+                crossing_count=interruptions.crossing_count,
+                longest_uninterrupted_m=(
+                    interruptions.longest_uninterrupted_m
+                ),
+                signals_per_km=interruptions.signals_per_km,
+                pedestrian_path_ratio=pedestrian_path_ratio(
+                    candidate.geometry,
+                    candidate.extras,
+                ),
+                contains_stairs=contains_stairs(
+                    candidate.geometry,
+                    candidate.extras,
                 ),
             )
         )

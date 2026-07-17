@@ -1,5 +1,6 @@
 import pytest
 
+from app.flow.interruptions import InterruptionStore, _build_cell_index
 from app.restrooms.geo import RESTROOM_PROXIMITY_THRESHOLD_M, RestroomMatch
 from app.restrooms.models import Restroom
 from app.restrooms.scoring import (
@@ -15,6 +16,11 @@ from app.restrooms.scoring import (
     score_and_rank_candidates,
 )
 from app.routing.provider import Coordinate, RouteCandidate, RoutePoint
+
+
+EMPTY_INTERRUPTION_STORE = InterruptionStore(
+    signals=(), crossings=(), signal_cell_index={}, crossing_cell_index={}
+)
 
 
 def make_restroom(
@@ -186,6 +192,7 @@ def test_score_and_rank_candidates_drops_unmatched() -> None:
         min_mile_m=500.0,
         max_mile_m=1500.0,
         preferred_elevation_bucket="flat",
+        interruption_store=EMPTY_INTERRUPTION_STORE,
     )
 
     assert result == []
@@ -374,6 +381,7 @@ def test_score_and_rank_candidates_splits_matched_and_fallback() -> None:
         min_mile_m=1000.0,
         max_mile_m=1200.0,
         preferred_elevation_bucket="flat",
+        interruption_store=EMPTY_INTERRUPTION_STORE,
     )
 
     # Raw errors:
@@ -424,16 +432,18 @@ def test_score_and_rank_candidates_splits_matched_and_fallback() -> None:
     assert scored_c.composite_score == pytest.approx(0.5)
 
     # b is the sole matched candidate: its composite score is the
-    # renormalized 5-factor formula, and since elevation/repeated-
-    # segment/similarity/off-route are all 0 and restroom_confidence
+    # renormalized 6-factor formula, and since elevation/repeated-
+    # segment/interruption/similarity/off-route are all 0 (interruption
+    # is 0 because the store passed in this test is empty, so
+    # signals_per_km is 0 for every candidate) and restroom_confidence
     # is 0.5 (identical across all three restrooms), b's composite
     # collapses to just the restroom-confidence term. off_route_norm
     # is 0 because the matched restroom sits exactly on the route
     # (real match_restrooms_to_route(), not the make_match() fixture,
     # is used here via score_and_rank_candidates()).
-    #   composite = (3/8)*0 + (2/8)*0 + (1/8)*0 + (1/8)*(1 - 0.5)
-    #             + (1/8)*0 = (1/8)*0.5 = 1/16
-    assert scored_b.composite_score == pytest.approx(1 / 16)
+    #   composite = (3/10)*0 + (2/10)*0 + (2/10)*0 + (1/10)*(1 - 0.5)
+    #             + (1/10)*0 = (1/10)*0.5 = 1/20
+    assert scored_b.composite_score == pytest.approx(1 / 20)
     assert scored_b.elevation_mismatch == pytest.approx(0.0)
     assert scored_b.repeated_segment_ratio == pytest.approx(0.0)
     assert scored_b.restroom_confidence == pytest.approx(0.5)
@@ -443,7 +453,7 @@ def test_score_and_rank_candidates_splits_matched_and_fallback() -> None:
 def test_score_and_rank_candidates_ranks_matched_pool_by_renormalized_composite() -> None:  # noqa: E501
     # Two candidates, both matched (small distance/range error), that
     # differ only in elevation_mismatch. This isolates the renormalized
-    # composite among a purely-matched pool, verifying the 3/8 weight
+    # composite among a purely-matched pool, verifying the 3/10 weight
     # on elevation_mismatch is applied as expected.
     flat_candidate = make_candidate_with_gain(
         elevation_gain_m=0.0,
@@ -467,6 +477,7 @@ def test_score_and_rank_candidates_ranks_matched_pool_by_renormalized_composite(
         min_mile_m=0.0,
         max_mile_m=100.0,
         preferred_elevation_bucket="flat",
+        interruption_store=EMPTY_INTERRUPTION_STORE,
     )
 
     assert [scored.candidate for scored in result] == [
@@ -481,20 +492,24 @@ def test_score_and_rank_candidates_ranks_matched_pool_by_renormalized_composite(
 
     # flat_candidate: gain_per_km=0 -> "flat" bucket -> mismatch 0.0
     # hilly_candidate: gain_per_km=40 -> "hilly" bucket -> mismatch 1.0
-    # Both restroom_confidence=0.5, repeated_segment_ratio=0. Both
-    # candidates share the single restroom, sitting exactly on both
-    # candidates' single-point geometry, so off_route_norm=0.0 for
-    # both. Both candidates use make_candidate_with_gain()'s single-
-    # point geometry at the same lat/lon, so they are a 100% grid-cell
-    # overlap: the provisional order ranks flat first (lower subtotal),
-    # so hilly's similarity_penalty against the already-ranked flat
-    # geometry is 1.0 (full overlap), while flat -- ranked first,
-    # nothing above it -- gets 0.0.
-    #   flat:  (3/8)*0.0 + (1/8)*0.5 + (1/8)*0.0 + (1/8)*0.0 = 1/16
-    #   hilly: (3/8)*1.0 + (1/8)*0.5 + (1/8)*1.0 + (1/8)*0.0
-    #        = 3/8 + 1/16 + 1/8 = 6/16 + 1/16 + 2/16 = 9/16
-    assert scored_flat.composite_score == pytest.approx(1 / 16)
-    assert scored_hilly.composite_score == pytest.approx(9 / 16)
+    # Both restroom_confidence=0.5, repeated_segment_ratio=0, and
+    # interruption_norm=0 (the store passed in this test is empty, so
+    # signals_per_km is 0 for both). Both candidates share the single
+    # restroom, sitting exactly on both candidates' single-point
+    # geometry, so off_route_norm=0.0 for both. Both candidates use
+    # make_candidate_with_gain()'s single-point geometry at the same
+    # lat/lon, so they are a 100% grid-cell overlap: the provisional
+    # order ranks flat first (lower subtotal), so hilly's
+    # similarity_penalty against the already-ranked flat geometry is
+    # 1.0 (full overlap), while flat -- ranked first, nothing above it
+    # -- gets 0.0.
+    #   flat:  (3/10)*0.0 + (2/10)*0.0 + (2/10)*0.0 + (1/10)*0.5
+    #        + (1/10)*0.0 + (1/10)*0.0 = 1/20
+    #   hilly: (3/10)*1.0 + (2/10)*0.0 + (2/10)*0.0 + (1/10)*0.5
+    #        + (1/10)*0.0 + (1/10)*1.0
+    #        = 3/10 + 1/20 + 1/10 = 6/20 + 1/20 + 2/20 = 9/20
+    assert scored_flat.composite_score == pytest.approx(1 / 20)
+    assert scored_hilly.composite_score == pytest.approx(9 / 20)
     assert scored_flat.similarity_penalty == pytest.approx(0.0)
     assert scored_hilly.similarity_penalty == pytest.approx(1.0)
 
@@ -539,6 +554,7 @@ def test_score_and_rank_candidates_off_route_term_affects_matched_composite() ->
         min_mile_m=0.0,
         max_mile_m=100.0,
         preferred_elevation_bucket="flat",
+        interruption_store=EMPTY_INTERRUPTION_STORE,
     )
 
     assert [scored.candidate for scored in result] == [
@@ -601,6 +617,7 @@ def test_score_and_rank_candidates_backfills_with_fallback_when_understocked() -
         min_mile_m=1000.0,
         max_mile_m=1200.0,
         preferred_elevation_bucket="flat",
+        interruption_store=EMPTY_INTERRUPTION_STORE,
     )
 
     assert len(result) == 2
@@ -631,6 +648,7 @@ def test_score_and_rank_candidates_off_route_distance_m_surfaces_match_field() -
         min_mile_m=0.0,
         max_mile_m=100.0,
         preferred_elevation_bucket="flat",
+        interruption_store=EMPTY_INTERRUPTION_STORE,
     )
 
     assert len(result) == 1
@@ -642,6 +660,70 @@ def test_score_and_rank_candidates_off_route_distance_m_surfaces_match_field() -
     assert result[0].off_route_distance_m == pytest.approx(
         result[0].restroom_match.distance_to_route_m
     )
+
+def test_score_and_rank_candidates_lower_signals_per_km_outranks_higher() -> None:  # noqa: E501
+    # Two candidates with identical shape/elevation/distance (shifted
+    # apart in longitude so they never overlap for similarity purposes,
+    # and so each only ever matches its own nearby restroom), differing
+    # only in how many traffic signals sit near their route -- isolates
+    # the new WEIGHT_INTERRUPTION term in the matched-pool composite.
+    quiet_candidate = make_candidate(
+        start_lat=40.70,
+        longitude=-74.00,
+        distance_m=1000.0,
+    )
+    noisy_candidate = make_candidate(
+        start_lat=40.70,
+        longitude=-73.90,
+        distance_m=1000.0,
+    )
+
+    quiet_restroom = make_restroom(
+        source_id="quiet",
+        latitude=40.70,
+        longitude=-74.00,
+    )
+    noisy_restroom = make_restroom(
+        source_id="noisy",
+        latitude=40.70,
+        longitude=-73.90,
+    )
+
+    # Sits exactly on noisy_candidate's second geometry point (see
+    # make_candidate()), well within the default 25m match threshold --
+    # quiet_candidate's geometry is ~9km away in longitude, so it never
+    # matches this signal. The cell index is built the same way
+    # load_interruption_store() would, so route_interruptions()'s cell
+    # lookup actually finds it.
+    signals = (Coordinate(lat=40.71, lon=-73.90),)
+    store = InterruptionStore(
+        signals=signals,
+        crossings=(),
+        signal_cell_index=_build_cell_index(signals),
+        crossing_cell_index={},
+    )
+
+    result = score_and_rank_candidates(
+        candidates=[noisy_candidate, quiet_candidate],
+        restrooms=[quiet_restroom, noisy_restroom],
+        target_distance_m=1000.0,
+        min_mile_m=0.0,
+        max_mile_m=100.0,
+        preferred_elevation_bucket="flat",
+        interruption_store=store,
+    )
+
+    assert [scored.candidate for scored in result] == [
+        quiet_candidate,
+        noisy_candidate,
+    ]
+
+    scored_quiet, scored_noisy = result
+
+    assert scored_quiet.signals_per_km == pytest.approx(0.0)
+    assert scored_noisy.signals_per_km > 0.0
+    assert scored_noisy.composite_score > scored_quiet.composite_score
+
 
 def test_best_restroom_waypoint_returns_matched_restroom_coordinate() -> None:  # noqa: E501
     candidate = make_candidate(

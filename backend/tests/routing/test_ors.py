@@ -268,6 +268,76 @@ def test_rate_limited_request_retries_then_succeeds(
     assert responses == []
 
 
+def test_get_loop_parses_extras_when_present(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fixture = load_fixture("round_trip_success.json")
+
+    # Built inline rather than editing the shared fixture file -- every
+    # other test in this module relies on that fixture having no
+    # extras block, so extras are grafted onto a deep-ish copy instead.
+    fixture_with_extras = json.loads(json.dumps(fixture))
+    feature = cast(
+        list[dict[str, object]], fixture_with_extras["features"]
+    )[0]
+    properties = cast(dict[str, object], feature["properties"])
+    properties["extras"] = {
+        "waytype": {"values": [[0, 1, 7], [1, 3, 2]]},
+        "surface": {"values": [[0, 3, 5]]},
+        "steepness": {"values": [[0, 1, 0], [1, 3, 2]]},
+    }
+
+    def fake_post(
+        *_args: object,
+        **_kwargs: object,
+    ) -> httpx.Response:
+        return make_response(200, fixture_with_extras)
+
+    monkeypatch.setenv("ORS_API_KEY", "test-key")
+    monkeypatch.setattr("app.routing.ors.httpx.post", fake_post)
+
+    provider = OpenRouteServiceProvider()
+
+    candidate = provider.get_loop(
+        start=Coordinate(lat=40.7128, lon=-74.0060),
+        target_distance_m=5000.0,
+        seed=1,
+    )
+
+    assert candidate.extras is not None
+    assert candidate.extras.waytype_segments == ((0, 1, 7), (1, 3, 2))
+    assert candidate.extras.surface_segments == ((0, 3, 5),)
+    assert candidate.extras.steepness_segments == (
+        (0, 1, 0),
+        (1, 3, 2),
+    )
+
+
+def test_get_loop_extras_none_when_absent_from_fixture(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fixture = load_fixture("round_trip_success.json")
+
+    def fake_post(
+        *_args: object,
+        **_kwargs: object,
+    ) -> httpx.Response:
+        return make_response(200, fixture)
+
+    monkeypatch.setenv("ORS_API_KEY", "test-key")
+    monkeypatch.setattr("app.routing.ors.httpx.post", fake_post)
+
+    provider = OpenRouteServiceProvider()
+
+    candidate = provider.get_loop(
+        start=Coordinate(lat=40.7128, lon=-74.0060),
+        target_distance_m=5000.0,
+        seed=1,
+    )
+
+    assert candidate.extras is None
+
+
 def test_rate_limited_request_raises_after_retries_exhausted(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -4,6 +4,10 @@ from typing import Annotated, Literal
 from fastapi import Depends, FastAPI, HTTPException
 from pydantic import BaseModel, Field
 
+from app.flow.interruptions import (
+    InterruptionStore,
+    get_interruption_store as _get_interruption_store,
+)
 from app.restrooms.hours import confidently_closed
 from app.restrooms.models import Restroom
 from app.restrooms.repository import (
@@ -95,6 +99,12 @@ class RankedRouteResponse(BaseModel):
     restroom_confidence: float
     similarity_penalty: float
     composite_score: float
+    signal_count: int
+    crossing_count: int
+    longest_uninterrupted_m: float
+    signals_per_km: float
+    pedestrian_path_ratio: float
+    contains_stairs: bool
 
 
 def get_routing_provider() -> RoutingProvider:
@@ -104,6 +114,10 @@ def get_routing_provider() -> RoutingProvider:
 def get_eligible_restrooms() -> list[Restroom]:
     client = get_supabase_client()
     return fetch_eligible_restrooms(client)
+
+
+def get_interruption_store() -> InterruptionStore:
+    return _get_interruption_store()
 
 
 @app.get("/health")
@@ -153,6 +167,10 @@ def get_routes_with_restroom(
     restrooms: Annotated[
         list[Restroom],
         Depends(get_eligible_restrooms),
+    ],
+    interruption_store: Annotated[
+        InterruptionStore,
+        Depends(get_interruption_store),
     ],
 ) -> list[RankedRouteResponse]:
     start = Coordinate(
@@ -260,6 +278,7 @@ def get_routes_with_restroom(
         min_mile_m,
         max_mile_m,
         preferred_elevation_bucket=request.elevation_preference,
+        interruption_store=interruption_store,
     )
 
     if not scored_candidates:
@@ -298,6 +317,12 @@ def get_routes_with_restroom(
             restroom_confidence=scored.restroom_confidence,
             similarity_penalty=scored.similarity_penalty,
             composite_score=scored.composite_score,
+            signal_count=scored.signal_count,
+            crossing_count=scored.crossing_count,
+            longest_uninterrupted_m=scored.longest_uninterrupted_m,
+            signals_per_km=scored.signals_per_km,
+            pedestrian_path_ratio=scored.pedestrian_path_ratio,
+            contains_stairs=scored.contains_stairs,
         )
         for scored in scored_candidates[: request.count]
     ]
