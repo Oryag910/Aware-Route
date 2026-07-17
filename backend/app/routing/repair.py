@@ -31,7 +31,10 @@ MAX_REPAIR_ROUNDS = 3
 
 # Bound on total ORS calls one candidate can consume across all its
 # anchors, so a stubborn candidate can't eat the whole request budget.
-MAX_REPAIR_CALLS_PER_CANDIDATE = 4
+# Kept equal to MAX_REPAIR_ROUNDS: the 2026-07-17 benchmark showed
+# spreading the shared budget across more near-misses converts more
+# scenarios than letting two candidates go deep.
+MAX_REPAIR_CALLS_PER_CANDIDATE = 3
 
 # Shared budget across all repaired candidates in one request, so a
 # request with many near-misses can't blow through the ORS rate limit.
@@ -132,6 +135,7 @@ def _repair_candidate(
             target_distance_m - previous_distance_m
         ) / ASSUMED_ROUTE_M_PER_NUDGE_M
         rounds_without_improvement = 0
+        previous_attempt_error = float("inf")
 
         for _ in range(MAX_REPAIR_ROUNDS):
             if calls_used >= max_calls or abs(nudge_m) < 1.0:
@@ -168,9 +172,20 @@ def _repair_candidate(
             if attempt_error < best_error:
                 best = attempt
                 best_error = attempt_error
+
+            # Progress is judged against the previous attempt on this
+            # anchor's trajectory, not against the original candidate:
+            # converting a loop into an out-and-back passes through a
+            # much-worse intermediate before the radial is resized
+            # correctly, and judging that dip as failure aborts repair
+            # one round before it converges (found live in the
+            # 2026-07-17 benchmark regression).
+            if attempt_error < previous_attempt_error:
                 rounds_without_improvement = 0
             else:
                 rounds_without_improvement += 1
+
+            previous_attempt_error = attempt_error
 
             if best_error <= MAX_DISTANCE_ERROR_M:
                 return _RepairOutcome(best, calls_used, False)

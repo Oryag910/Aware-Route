@@ -120,23 +120,21 @@ def test_near_miss_candidate_is_corrected_when_first_attempt_converges() -> None
     assert len(provider.calls) == 1
 
 
-def test_repair_keeps_the_best_attempt_across_rounds_and_anchors() -> None:
+def test_repair_keeps_the_best_attempt_across_rounds() -> None:
     near_miss = make_target(TARGET_DISTANCE_M + 200.0)
-    # None of the attempts hits the ±100m constraint. The first anchor
-    # burns its 3 rounds (worse/better/final), then the fallback anchor
-    # gets the remaining 1 call of the 4-call per-candidate cap. Repair
-    # must keep the best attempt overall (the second), not the last.
+    # None of the 3 attempts (the per-candidate call cap) hits the
+    # ±100m constraint -- repair must keep whichever attempt had the
+    # smallest error overall (the second), not the last one that
+    # happened to run.
     worse_attempt = make_candidate(TARGET_DISTANCE_M + 150.0)
     better_attempt = make_candidate(TARGET_DISTANCE_M + 120.0)
     final_attempt = make_candidate(TARGET_DISTANCE_M + 140.0)
-    fallback_anchor_attempt = make_candidate(TARGET_DISTANCE_M + 300.0)
 
     provider = FakeRepairProvider(
         waypoint_responses=[
             worse_attempt,
             better_attempt,
             final_attempt,
-            fallback_anchor_attempt,
         ]
     )
 
@@ -145,7 +143,32 @@ def test_repair_keeps_the_best_attempt_across_rounds_and_anchors() -> None:
     )
 
     assert result == [better_attempt]
-    assert len(provider.calls) == 4
+    assert len(provider.calls) == 3
+
+
+def test_repair_tolerates_worse_intermediate_attempts_while_converging() -> None:  # noqa: E501
+    # Reshaping a loop into an out-and-back always passes through a
+    # much-worse intermediate attempt before the radial distance is
+    # resized correctly. Repair must judge progress against the
+    # previous attempt on the trajectory (3000 -> 600 -> 50, always
+    # improving) rather than against the original candidate's 200.0
+    # error -- the latter aborted convergence one round early in the
+    # 2026-07-17 benchmark regression.
+    near_miss = make_target(TARGET_DISTANCE_M + 200.0)
+    much_worse = make_candidate(TARGET_DISTANCE_M + 3000.0)
+    closer = make_candidate(TARGET_DISTANCE_M + 600.0)
+    converged = make_candidate(TARGET_DISTANCE_M + 50.0)
+
+    provider = FakeRepairProvider(
+        waypoint_responses=[much_worse, closer, converged]
+    )
+
+    result = repair_near_miss_candidates(
+        provider, [near_miss], START, TARGET_DISTANCE_M
+    )
+
+    assert result == [converged]
+    assert len(provider.calls) == 3
 
 
 def test_unroutable_anchor_falls_back_to_next_anchor() -> None:
