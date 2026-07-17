@@ -224,6 +224,9 @@ def test_routes_with_restroom_success() -> None:
         "signals_per_km",
         "pedestrian_path_ratio",
         "contains_stairs",
+        "sharp_turn_count",
+        "u_turn_count",
+        "compactness",
     }
 
     assert route["distance_m"] == pytest.approx(2220.0)
@@ -248,6 +251,12 @@ def test_routes_with_restroom_success() -> None:
     assert route["signals_per_km"] == pytest.approx(0.0)
     assert route["pedestrian_path_ratio"] == pytest.approx(0.0)
     assert route["contains_stairs"] is False
+    # make_candidate()'s geometry is a straight 3-point line -- no
+    # heading change anywhere, and too degenerate a shape (not a closed
+    # loop) for compactness to read as anything but near-zero.
+    assert route["sharp_turn_count"] == 0
+    assert route["u_turn_count"] == 0
+    assert route["compactness"] == pytest.approx(0.0, abs=0.05)
 
     assert len(route["geometry"]) == 3
     assert route["geometry"][0]["lat"] == pytest.approx(40.70)

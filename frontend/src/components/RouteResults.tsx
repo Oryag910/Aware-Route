@@ -1,4 +1,5 @@
 import type { RankedRoute } from "../api";
+import { routeFacts, tradeoffLine } from "../explanations";
 
 type RouteResultsProps = {
   routes: RankedRoute[];
@@ -11,6 +12,8 @@ export default function RouteResults({
   selectedIndex,
   onSelect,
 }: RouteResultsProps) {
+  const bestRoute = routes[0] ?? null;
+
   return (
     <section>
       <h2>Route Options</h2>
@@ -22,14 +25,11 @@ export default function RouteResults({
       <div>
         {routes.map((route, index) => {
           const isSelected = index === selectedIndex;
-          const distanceMiles = (route.distance_m / 1609.34).toFixed(2);
-          const restroomMile = (
-            route.restroom.mile_marker_m / 1609.34
-          ).toFixed(2);
-          const offRouteDistanceM = Math.round(
-            route.off_route_distance_m,
-          );
-          const isReachableOnRoute = route.off_route_distance_m <= 50;
+          const facts = routeFacts(route);
+          const tradeoff =
+            index > 0 && bestRoute !== null
+              ? tradeoffLine(route, bestRoute)
+              : null;
 
           return (
             <button
@@ -78,45 +78,23 @@ export default function RouteResults({
                 </p>
               )}
 
-              <p>
-                <strong>Distance:</strong> {distanceMiles} miles
-              </p>
+              <ul
+                style={{
+                  margin: "8px 0",
+                  paddingLeft: "20px",
+                  fontSize: "0.9rem",
+                }}
+              >
+                {facts.map((fact) => (
+                  <li key={fact}>{fact}</li>
+                ))}
+              </ul>
 
-              <p>
-                <strong>Restroom:</strong>{" "}
-                {route.restroom.facility_name}
-              </p>
-
-              <p>
-                <strong>Restroom mile:</strong> {restroomMile}
-              </p>
-
-              {isReachableOnRoute ? (
-                <p>
-                  <strong>Restroom:</strong> {offRouteDistanceM} m
-                  off-route
-                </p>
-              ) : (
-                <p style={{ color: "#854d0e" }}>
-                  <strong>Restroom:</strong> ~{offRouteDistanceM} m
-                  detour required
+              {tradeoff !== null && (
+                <p style={{ fontStyle: "italic", fontSize: "0.85rem" }}>
+                  {tradeoff}
                 </p>
               )}
-
-              <p>
-                <strong>Elevation mismatch:</strong>{" "}
-                {route.elevation_mismatch.toFixed(3)}
-              </p>
-
-              <p>
-                <strong>Restroom confidence:</strong>{" "}
-                {route.restroom_confidence.toFixed(3)}
-              </p>
-
-              <p>
-                <strong>Composite score:</strong>{" "}
-                {route.composite_score.toFixed(3)}
-              </p>
             </button>
           );
         })}

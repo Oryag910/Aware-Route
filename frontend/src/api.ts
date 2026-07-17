@@ -37,6 +37,9 @@ export type RankedRoute = {
   signals_per_km: number;
   pedestrian_path_ratio: number;
   contains_stairs: boolean;
+  sharp_turn_count: number;
+  u_turn_count: number;
+  compactness: number;
 };
 
 export class ApiError extends Error {

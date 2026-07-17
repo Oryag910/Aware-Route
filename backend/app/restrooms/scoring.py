@@ -1,6 +1,7 @@
 from dataclasses import dataclass
 
 from app.flow.interruptions import InterruptionStore, route_interruptions
+from app.flow.shape import compactness, sharp_turn_count, u_turn_count
 from app.flow.surfaces import contains_stairs, pedestrian_path_ratio
 from app.restrooms.geo import (
     RESTROOM_PROXIMITY_THRESHOLD_M,
@@ -48,6 +49,11 @@ SIGNALS_PER_KM_CEILING = 8.0
 # as a quality signal (many real crossings are untagged or tagged
 # without a recognizable pattern), unlike traffic_signals which is
 # reliably tagged.
+# Shape metrics (sharp_turn_count, u_turn_count, compactness) are
+# reported but deliberately not scored here -- repeated_segment_ratio
+# already penalizes the dominant shape failure (out-and-backs), and
+# shape is meant to become a preset-weighted factor in a later phase,
+# not a fixed weight in this composite.
 WEIGHT_ELEVATION_MISMATCH = 3 / 10
 WEIGHT_REPEATED_SEGMENT = 2 / 10
 WEIGHT_INTERRUPTION = 2 / 10
@@ -202,6 +208,9 @@ class _PartialScore:
     signals_per_km: float
     pedestrian_path_ratio: float
     contains_stairs: bool
+    sharp_turn_count: int
+    u_turn_count: int
+    compactness: float
 
 
 @dataclass(frozen=True)
@@ -225,6 +234,9 @@ class ScoredCandidate:
     signals_per_km: float
     pedestrian_path_ratio: float
     contains_stairs: bool
+    sharp_turn_count: int
+    u_turn_count: int
+    compactness: float
 
 
 def _rank_matched(
@@ -295,6 +307,9 @@ def _rank_matched(
             signals_per_km=partial.signals_per_km,
             pedestrian_path_ratio=partial.pedestrian_path_ratio,
             contains_stairs=partial.contains_stairs,
+            sharp_turn_count=partial.sharp_turn_count,
+            u_turn_count=partial.u_turn_count,
+            compactness=partial.compactness,
         )
         for index, partial in enumerate(matched)
     ]
@@ -341,6 +356,9 @@ def _rank_fallback(
             signals_per_km=partial.signals_per_km,
             pedestrian_path_ratio=partial.pedestrian_path_ratio,
             contains_stairs=partial.contains_stairs,
+            sharp_turn_count=partial.sharp_turn_count,
+            u_turn_count=partial.u_turn_count,
+            compactness=partial.compactness,
         )
         for index, partial in enumerate(fallback)
     ]
@@ -428,6 +446,9 @@ def score_and_rank_candidates(
                     candidate.geometry,
                     candidate.extras,
                 ),
+                sharp_turn_count=sharp_turn_count(candidate.geometry),
+                u_turn_count=u_turn_count(candidate.geometry),
+                compactness=compactness(candidate.geometry),
             )
         )
 

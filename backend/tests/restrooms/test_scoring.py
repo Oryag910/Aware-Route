@@ -1,6 +1,7 @@
 import pytest
 
 from app.flow.interruptions import InterruptionStore, _build_cell_index
+from app.flow.shape import compactness, sharp_turn_count, u_turn_count
 from app.restrooms.geo import RESTROOM_PROXIMITY_THRESHOLD_M, RestroomMatch
 from app.restrooms.models import Restroom
 from app.restrooms.scoring import (
@@ -740,6 +741,41 @@ def test_best_restroom_waypoint_returns_matched_restroom_coordinate() -> None:  
     )
 
     assert waypoint == Coordinate(lat=40.71, lon=-74.00)
+
+
+def test_score_and_rank_candidates_passes_through_shape_metrics() -> None:  # noqa: E501
+    # No weight changes in this phase -- just confirms the three shape
+    # fields make it onto ScoredCandidate unchanged from the standalone
+    # shape.py functions, for the same candidate geometry.
+    candidate = make_candidate(
+        start_lat=40.70,
+        longitude=-74.00,
+        distance_m=2200.0,
+    )
+    restroom = make_restroom(
+        source_id="shared",
+        latitude=40.71,
+        longitude=-74.00,
+    )
+
+    result = score_and_rank_candidates(
+        candidates=[candidate],
+        restrooms=[restroom],
+        target_distance_m=2200.0,
+        min_mile_m=0.0,
+        max_mile_m=5000.0,
+        preferred_elevation_bucket="flat",
+        interruption_store=EMPTY_INTERRUPTION_STORE,
+    )
+
+    assert len(result) == 1
+    scored = result[0]
+
+    assert scored.sharp_turn_count == sharp_turn_count(candidate.geometry)
+    assert scored.u_turn_count == u_turn_count(candidate.geometry)
+    assert scored.compactness == pytest.approx(
+        compactness(candidate.geometry)
+    )
 
 
 def test_best_restroom_waypoint_returns_none_without_a_match() -> None:

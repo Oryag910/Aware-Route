@@ -105,6 +105,9 @@ class RankedRouteResponse(BaseModel):
     signals_per_km: float
     pedestrian_path_ratio: float
     contains_stairs: bool
+    sharp_turn_count: int
+    u_turn_count: int
+    compactness: float
 
 
 def get_routing_provider() -> RoutingProvider:
@@ -323,6 +326,9 @@ def get_routes_with_restroom(
             signals_per_km=scored.signals_per_km,
             pedestrian_path_ratio=scored.pedestrian_path_ratio,
             contains_stairs=scored.contains_stairs,
+            sharp_turn_count=scored.sharp_turn_count,
+            u_turn_count=scored.u_turn_count,
+            compactness=scored.compactness,
         )
         for scored in scored_candidates[: request.count]
     ]
