@@ -77,6 +77,43 @@ class _RepairOutcome:
     provider_failed: bool
 
 
+def _band_error_m(
+    marker_m: float,
+    min_mile_m: float,
+    max_mile_m: float,
+) -> float:
+    if marker_m < min_mile_m:
+        return min_mile_m - marker_m
+
+    if marker_m > max_mile_m:
+        return marker_m - max_mile_m
+
+    return 0.0
+
+
+def _via_before_anchor(
+    start: Coordinate,
+    via: Coordinate,
+    target_distance_m: float,
+    min_mile_m: float,
+    max_mile_m: float,
+) -> bool:
+    """Whether the restroom should ride the outbound leg (before the
+    anchor) or the return leg. An out-and-back places an outbound via
+    at roughly its direct distance from start, and a return-leg via at
+    roughly the target minus that — pick whichever estimate lands
+    closer to the requested restroom band, so fixing distance also
+    places the restroom correctly instead of wherever it happens to
+    fall."""
+    direct_m = haversine_m(start, via)
+    outbound_error = _band_error_m(direct_m, min_mile_m, max_mile_m)
+    return_error = _band_error_m(
+        target_distance_m - direct_m, min_mile_m, max_mile_m
+    )
+
+    return outbound_error <= return_error
+
+
 def _anchor_points(
     geometry: tuple[RoutePoint, ...],
     start: Coordinate,
@@ -118,11 +155,17 @@ def _repair_candidate(
     target: RepairTarget,
     start: Coordinate,
     target_distance_m: float,
+    min_mile_m: float,
+    max_mile_m: float,
     max_calls: int,
 ) -> _RepairOutcome:
     best = target.candidate
     best_error = abs(best.distance_m - target_distance_m)
     calls_used = 0
+
+    via_first = target.via is not None and _via_before_anchor(
+        start, target.via, target_distance_m, min_mile_m, max_mile_m
+    )
 
     for anchor in _anchor_points(target.candidate.geometry, start):
         if calls_used >= max_calls:
@@ -147,11 +190,13 @@ def _repair_candidate(
                 break
 
             new_anchor = destination_point(start, bearing, radial_m)
-            waypoints = (
-                [start, target.via, new_anchor, start]
-                if target.via is not None
-                else [start, new_anchor, start]
-            )
+
+            if target.via is None:
+                waypoints = [start, new_anchor, start]
+            elif via_first:
+                waypoints = [start, target.via, new_anchor, start]
+            else:
+                waypoints = [start, new_anchor, target.via, start]
 
             try:
                 attempt = provider.get_route_through_waypoints(waypoints)
@@ -215,6 +260,8 @@ def repair_near_miss_candidates(
     targets: list[RepairTarget],
     start: Coordinate,
     target_distance_m: float,
+    min_mile_m: float,
+    max_mile_m: float,
 ) -> list[RouteCandidate]:
     results = [target.candidate for target in targets]
 
@@ -260,6 +307,8 @@ def repair_near_miss_candidates(
                 targets[index],
                 start,
                 target_distance_m,
+                min_mile_m,
+                max_mile_m,
                 max_calls=budgets[index],
             )
 

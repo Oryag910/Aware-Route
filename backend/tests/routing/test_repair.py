@@ -24,6 +24,8 @@ def _single_worker(monkeypatch: pytest.MonkeyPatch) -> None:
 
 START = Coordinate(lat=40.70, lon=-74.00)
 TARGET_DISTANCE_M = 2220.0
+MIN_MILE_M = 800.0
+MAX_MILE_M = 1600.0
 
 # 0.15 * 2220.0 = 333.0 -- the first repair pass covers errors in
 # (100.0, 333.0]. The rescue pass (only when nothing is within
@@ -85,7 +87,7 @@ def test_already_accurate_candidates_are_left_untouched() -> None:
     provider = FakeRepairProvider(waypoint_responses=[])
 
     result = repair_near_miss_candidates(
-        provider, [target], START, TARGET_DISTANCE_M
+        provider, [target], START, TARGET_DISTANCE_M, MIN_MILE_M, MAX_MILE_M
     )
 
     assert result == [target.candidate]
@@ -99,7 +101,7 @@ def test_beyond_rescue_ratio_candidates_are_never_repaired() -> None:
     provider = FakeRepairProvider(waypoint_responses=[])
 
     result = repair_near_miss_candidates(
-        provider, [target], START, TARGET_DISTANCE_M
+        provider, [target], START, TARGET_DISTANCE_M, MIN_MILE_M, MAX_MILE_M
     )
 
     assert result == [target.candidate]
@@ -112,7 +114,7 @@ def test_near_miss_candidate_is_corrected_when_first_attempt_converges() -> None
     provider = FakeRepairProvider(waypoint_responses=[corrected])
 
     result = repair_near_miss_candidates(
-        provider, [near_miss], START, TARGET_DISTANCE_M
+        provider, [near_miss], START, TARGET_DISTANCE_M, MIN_MILE_M, MAX_MILE_M
     )
 
     assert result == [corrected]
@@ -139,7 +141,7 @@ def test_repair_keeps_the_best_attempt_across_rounds() -> None:
     )
 
     result = repair_near_miss_candidates(
-        provider, [near_miss], START, TARGET_DISTANCE_M
+        provider, [near_miss], START, TARGET_DISTANCE_M, MIN_MILE_M, MAX_MILE_M
     )
 
     assert result == [better_attempt]
@@ -164,7 +166,7 @@ def test_repair_tolerates_worse_intermediate_attempts_while_converging() -> None
     )
 
     result = repair_near_miss_candidates(
-        provider, [near_miss], START, TARGET_DISTANCE_M
+        provider, [near_miss], START, TARGET_DISTANCE_M, MIN_MILE_M, MAX_MILE_M
     )
 
     assert result == [converged]
@@ -186,7 +188,7 @@ def test_unroutable_anchor_falls_back_to_next_anchor() -> None:
     )
 
     result = repair_near_miss_candidates(
-        provider, [near_miss], START, TARGET_DISTANCE_M
+        provider, [near_miss], START, TARGET_DISTANCE_M, MIN_MILE_M, MAX_MILE_M
     )
 
     assert result == [corrected]
@@ -215,6 +217,8 @@ def test_provider_error_aborts_only_that_candidate() -> None:
         [closer_near_miss, further_near_miss],
         START,
         TARGET_DISTANCE_M,
+        MIN_MILE_M,
+        MAX_MILE_M,
     )
 
     # closer_near_miss keeps its best-so-far (its original candidate,
@@ -240,6 +244,8 @@ def test_provider_failure_in_pass_one_skips_rescue_pass() -> None:
         [only_near_miss],
         START,
         TARGET_DISTANCE_M,
+        MIN_MILE_M,
+        MAX_MILE_M,
     )
 
     assert result == [only_near_miss.candidate]
@@ -268,6 +274,8 @@ def test_shared_budget_is_spent_on_most_promising_candidate_first(
         [further_near_miss, closer_near_miss],
         START,
         TARGET_DISTANCE_M,
+        MIN_MILE_M,
+        MAX_MILE_M,
     )
 
     # The single call went to closer_near_miss (improved to +150.0);
@@ -286,7 +294,7 @@ def test_rescue_pass_repairs_moderate_misses_when_nothing_matches() -> None:
     provider = FakeRepairProvider(waypoint_responses=[corrected])
 
     result = repair_near_miss_candidates(
-        provider, [moderate_miss], START, TARGET_DISTANCE_M
+        provider, [moderate_miss], START, TARGET_DISTANCE_M, MIN_MILE_M, MAX_MILE_M
     )
 
     assert result == [corrected]
@@ -299,7 +307,12 @@ def test_rescue_pass_is_skipped_when_a_candidate_already_matches() -> None:
     provider = FakeRepairProvider(waypoint_responses=[])
 
     result = repair_near_miss_candidates(
-        provider, [accurate, moderate_miss], START, TARGET_DISTANCE_M
+        provider,
+        [accurate, moderate_miss],
+        START,
+        TARGET_DISTANCE_M,
+        MIN_MILE_M,
+        MAX_MILE_M,
     )
 
     # A candidate already satisfies the distance constraint, so no
@@ -318,7 +331,7 @@ def test_repair_preserves_via_waypoint_for_restroom_first_candidates() -> None: 
     provider = FakeRepairProvider(waypoint_responses=[corrected])
 
     result = repair_near_miss_candidates(
-        provider, [near_miss], START, TARGET_DISTANCE_M
+        provider, [near_miss], START, TARGET_DISTANCE_M, MIN_MILE_M, MAX_MILE_M
     )
 
     assert result == [corrected]
@@ -327,5 +340,36 @@ def test_repair_preserves_via_waypoint_for_restroom_first_candidates() -> None: 
     assert len(provider.calls) == 1
     assert provider.calls[0][0] == START
     assert provider.calls[0][1] == restroom_waypoint
+    assert provider.calls[0][-1] == START
+    assert len(provider.calls[0]) == 4
+
+
+def test_repair_places_via_on_return_leg_when_band_demands_it() -> None:
+    # The restroom sits ~334m from start -- far below the 800m band
+    # minimum, so riding the outbound leg would land it around mile
+    # marker 334m. The return leg places it at roughly
+    # target - 334m = 1886m, much closer to the band -- repair must
+    # order waypoints start -> anchor -> restroom -> start.
+    restroom_waypoint = Coordinate(lat=40.703, lon=-74.00)
+    near_miss = RepairTarget(
+        candidate=make_candidate(TARGET_DISTANCE_M + 200.0),
+        via=restroom_waypoint,
+    )
+    corrected = make_candidate(TARGET_DISTANCE_M)
+    provider = FakeRepairProvider(waypoint_responses=[corrected])
+
+    result = repair_near_miss_candidates(
+        provider,
+        [near_miss],
+        START,
+        TARGET_DISTANCE_M,
+        MIN_MILE_M,
+        MAX_MILE_M,
+    )
+
+    assert result == [corrected]
+    assert len(provider.calls) == 1
+    assert provider.calls[0][0] == START
+    assert provider.calls[0][2] == restroom_waypoint
     assert provider.calls[0][-1] == START
     assert len(provider.calls[0]) == 4

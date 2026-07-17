@@ -12,7 +12,10 @@ from app.restrooms.scoring import (
     best_restroom_waypoint,
     score_and_rank_candidates,
 )
-from app.restrooms.waypoint_candidates import get_restroom_first_candidates
+from app.restrooms.waypoint_candidates import (
+    get_restroom_first_candidates,
+    select_candidate_restrooms,
+)
 from app.routing.candidates import get_loop_candidates
 from app.routing.ors import OpenRouteServiceProvider
 from app.routing.errors import (
@@ -181,14 +184,30 @@ def get_routes_with_restroom(
     )
 
     # Every repair target carries a restroom as a via waypoint so
-    # fixing distance can't silently drop the restroom: restroom-first
-    # candidates keep the one they were built through, and blind
-    # candidates pin whichever restroom scoring would match them to
-    # (if any).
+    # fixing distance can't silently drop the restroom. Repair reshapes
+    # a loop into an out-and-back, which relocates every mile marker --
+    # so the pinned restroom is chosen predictively (straight-line
+    # closeness to the band midpoint, the same selection restroom-first
+    # generation uses), not by its position on the soon-to-be-discarded
+    # loop. Scoring's matched restroom is only a fallback for the rare
+    # case where no restroom passes the straight-line filter.
+    predictive_restrooms = select_candidate_restrooms(
+        restrooms, start, min_mile_m, max_mile_m, 1
+    )
+    predictive_via = (
+        Coordinate(
+            lat=predictive_restrooms[0].latitude,
+            lon=predictive_restrooms[0].longitude,
+        )
+        if predictive_restrooms
+        else None
+    )
+
     repair_targets = [
         RepairTarget(
             candidate=candidate,
-            via=best_restroom_waypoint(
+            via=predictive_via
+            or best_restroom_waypoint(
                 candidate, restrooms, min_mile_m, max_mile_m
             ),
         )
@@ -205,6 +224,8 @@ def get_routes_with_restroom(
         repair_targets,
         start,
         request.target_distance_m,
+        min_mile_m,
+        max_mile_m,
     )
 
     # Keep originals alongside their repaired versions rather than
