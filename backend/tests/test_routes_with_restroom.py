@@ -31,6 +31,15 @@ class FakeRoutingProvider:
     ) -> RouteCandidate:
         return self.candidate
 
+    def get_route_through_waypoints(
+        self,
+        waypoints: list[Coordinate],
+    ) -> RouteCandidate:
+        raise NotImplementedError(
+            "this fixture's candidate is never a near-miss, so repair "
+            "should never call this"
+        )
+
 
 class SingleSeedRoutingProvider:
     """Returns one candidate for seed==1 and a different candidate for
@@ -57,6 +66,15 @@ class SingleSeedRoutingProvider:
             return self.first_seed_candidate
 
         return self.other_seed_candidate
+
+    def get_route_through_waypoints(
+        self,
+        waypoints: list[Coordinate],
+    ) -> RouteCandidate:
+        raise NotImplementedError(
+            "this fixture's candidates are never near-misses, so "
+            "repair should never call this"
+        )
 
 
 @pytest.fixture(autouse=True)

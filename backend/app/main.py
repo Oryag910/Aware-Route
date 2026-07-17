@@ -15,6 +15,7 @@ from app.routing.errors import (
     RouteNotFoundError,
     RoutingProviderError
 )
+from app.routing.repair import repair_near_miss_candidates
 from app.routing.provider import (
     Coordinate,
     RouteCandidate,
@@ -160,6 +161,13 @@ def get_routes_with_restroom(
             status_code=502,
             detail=str(exc),
         ) from exc
+
+    candidates = repair_near_miss_candidates(
+        provider,
+        candidates,
+        start,
+        request.target_distance_m,
+    )
 
     scored_candidates = score_and_rank_candidates(
         candidates,

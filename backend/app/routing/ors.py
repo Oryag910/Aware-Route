@@ -44,27 +44,10 @@ class OpenRouteServiceProvider:
         load_dotenv()
         self.api_key = os.environ["ORS_API_KEY"]
 
-    def get_loop(
-        self,
-        start: Coordinate,
-        target_distance_m: float,
-        seed: int,
-    ) -> RouteCandidate:
+    def _send_request(self, body: dict[str, object]) -> httpx.Response:
         headers: dict[str, str] = {
             "Authorization": self.api_key,
             "Content-Type": "application/json",
-        }
-
-        body: dict[str, object] = {
-            "coordinates": [[start.lon, start.lat]],
-            "elevation": True,
-            "options": {
-                "round_trip": {
-                    "length": target_distance_m,
-                    "points": 3,
-                    "seed": seed,
-                }
-            },
         }
 
         try:
@@ -90,6 +73,12 @@ class OpenRouteServiceProvider:
                 f"Could not connect to OpenRouteService: {exc}"
             ) from exc
 
+        return response
+
+    def _parse_route_response(
+        self,
+        response: httpx.Response,
+    ) -> RouteCandidate:
         try:
             data: dict[str, object] = response.json()
 
@@ -155,3 +144,38 @@ class OpenRouteServiceProvider:
             distance_m=distance_m,
             elevation_gain_m=elevation_gain_m,
         )
+
+    def get_loop(
+        self,
+        start: Coordinate,
+        target_distance_m: float,
+        seed: int,
+    ) -> RouteCandidate:
+        body: dict[str, object] = {
+            "coordinates": [[start.lon, start.lat]],
+            "elevation": True,
+            "options": {
+                "round_trip": {
+                    "length": target_distance_m,
+                    "points": 3,
+                    "seed": seed,
+                }
+            },
+        }
+
+        response = self._send_request(body)
+        return self._parse_route_response(response)
+
+    def get_route_through_waypoints(
+        self,
+        waypoints: list[Coordinate],
+    ) -> RouteCandidate:
+        body: dict[str, object] = {
+            "coordinates": [
+                [waypoint.lon, waypoint.lat] for waypoint in waypoints
+            ],
+            "elevation": True,
+        }
+
+        response = self._send_request(body)
+        return self._parse_route_response(response)

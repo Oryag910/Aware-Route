@@ -5,6 +5,7 @@ from app.restrooms.models import Restroom
 from app.restrooms.repeated_segments import repeated_segment_ratio
 from app.restrooms.similarity import similarity_penalty_for_candidate
 from app.routing.provider import RouteCandidate, RoutePoint
+from app.routing.repair import MAX_DISTANCE_ERROR_M
 
 
 BASE_CONFIDENCE = 0.5
@@ -16,7 +17,6 @@ MODERATE_MAX_GAIN_PER_KM = 25.0
 
 BUCKET_ORDER = ("flat", "moderate", "hilly")
 
-MAX_DISTANCE_ERROR_M = 100.0
 MAX_RESTROOM_RANGE_ERROR_M = 500.0
 
 # Renormalized from the original 15:10:5:5 ratio now that distance_error

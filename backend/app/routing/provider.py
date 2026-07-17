@@ -30,3 +30,9 @@ class RoutingProvider(Protocol):
         seed: int,
     ) -> RouteCandidate:
         ...
+
+    def get_route_through_waypoints(
+        self,
+        waypoints: list[Coordinate],
+    ) -> RouteCandidate:
+        ...

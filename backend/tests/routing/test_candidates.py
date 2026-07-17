@@ -32,6 +32,14 @@ class FakeRoutingProvider:
             elevation_gain_m=float(seed),
         )
 
+    def get_route_through_waypoints(
+        self,
+        waypoints: list[Coordinate],
+    ) -> RouteCandidate:
+        raise NotImplementedError(
+            "get_loop_candidates never calls this"
+        )
+
 
 def test_get_loop_candidates_uses_sequential_seeds() -> None:
     provider = FakeRoutingProvider()

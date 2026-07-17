@@ -2,10 +2,10 @@ import pytest
 
 from app.restrooms.geo import (
     cumulative_distances_m,
-    haversine_m,
     match_restrooms_to_route,
 )
 from app.restrooms.models import Restroom
+from app.routing.geometry import haversine_m
 from app.routing.provider import Coordinate, RoutePoint
 
 

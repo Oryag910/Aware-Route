@@ -139,6 +139,76 @@ def test_missing_routable_point_raises_route_not_found(
     assert "Cannot find point" in str(error.value)
 
 
+def test_get_route_through_waypoints_parses_success_response(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fixture = load_fixture("round_trip_success.json")
+    captured_body: dict[str, object] = {}
+
+    def fake_post(
+        *_args: object,
+        **kwargs: object,
+    ) -> httpx.Response:
+        captured_body.update(cast(dict[str, object], kwargs["json"]))
+        return make_response(200, fixture)
+
+    monkeypatch.setenv("ORS_API_KEY", "test-key")
+    monkeypatch.setattr("app.routing.ors.httpx.post", fake_post)
+
+    provider = OpenRouteServiceProvider()
+
+    waypoints = [
+        Coordinate(lat=40.7128, lon=-74.0060),
+        Coordinate(lat=40.7200, lon=-74.0000),
+        Coordinate(lat=40.7128, lon=-74.0060),
+    ]
+
+    candidate = provider.get_route_through_waypoints(waypoints)
+
+    features = cast(list[dict[str, object]], fixture["features"])
+    feature = features[0]
+    properties = cast(dict[str, object], feature["properties"])
+    summary = cast(dict[str, object], properties["summary"])
+
+    assert candidate.distance_m == float(
+        cast(int | float, summary["distance"])
+    )
+
+    # No round_trip options block -- this is a plain multi-waypoint
+    # directions request, unlike get_loop's randomized round trip.
+    assert "options" not in captured_body
+    assert captured_body["coordinates"] == [
+        [-74.0060, 40.7128],
+        [-74.0000, 40.7200],
+        [-74.0060, 40.7128],
+    ]
+
+
+def test_get_route_through_waypoints_distance_limit_raises_route_not_found(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fixture = load_fixture("error_400_distance_limit.json")
+
+    def fake_post(
+        *_args: object,
+        **_kwargs: object,
+    ) -> httpx.Response:
+        return make_response(400, fixture)
+
+    monkeypatch.setenv("ORS_API_KEY", "test-key")
+    monkeypatch.setattr("app.routing.ors.httpx.post", fake_post)
+
+    provider = OpenRouteServiceProvider()
+
+    with pytest.raises(RouteNotFoundError):
+        provider.get_route_through_waypoints(
+            [
+                Coordinate(lat=40.7128, lon=-74.0060),
+                Coordinate(lat=40.7200, lon=-74.0000),
+            ]
+        )
+
+
 def test_bad_key_raises_routing_provider_error(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

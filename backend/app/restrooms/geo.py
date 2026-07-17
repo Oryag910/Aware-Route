@@ -1,35 +1,12 @@
 from dataclasses import dataclass
-from math import asin, cos, radians, sin, sqrt
 
 from app.restrooms.models import Restroom
+from app.routing.geometry import haversine_m
 from app.routing.provider import Coordinate, RoutePoint
 
 
-EARTH_RADIUS_M = 6_371_000.0
-
 # Empirically tunable straight-line threshold; ignores barriers like rivers and park boundaries.
 RESTROOM_PROXIMITY_THRESHOLD_M = 130.0
-
-
-def haversine_m(a: Coordinate, b: Coordinate) -> float:
-    lat_a = radians(a.lat)
-    lon_a = radians(a.lon)
-    lat_b = radians(b.lat)
-    lon_b = radians(b.lon)
-
-    latitude_difference = lat_b - lat_a
-    longitude_difference = lon_b - lon_a
-
-    haversine_value = (
-        sin(latitude_difference / 2) ** 2
-        + cos(lat_a)
-        * cos(lat_b)
-        * sin(longitude_difference / 2) ** 2
-    )
-
-    central_angle = 2 * asin(sqrt(haversine_value))
-
-    return EARTH_RADIUS_M * central_angle
 
 
 def cumulative_distances_m(
