@@ -1,0 +1,181 @@
+{
+  "run_at": "2026-07-17T17:50:54",
+  "summary": {
+    "scenarios_run": 17,
+    "successful": 17,
+    "with_matched_result": 4,
+    "median_response_time_s": 4.06
+  },
+  "scenarios": [
+    {
+      "name": "Central Park - Reservoir",
+      "status_code": 200,
+      "matched_count": 0,
+      "returned_count": 5,
+      "best_distance_error_m": 117.93999999999869,
+      "best_mile_range_error_m": 0.0,
+      "response_time_s": 15.64,
+      "error": null
+    },
+    {
+      "name": "Central Park - North Woods",
+      "status_code": 200,
+      "matched_count": 1,
+      "returned_count": 5,
+      "best_distance_error_m": 21.480000000001382,
+      "best_mile_range_error_m": 0.0,
+      "response_time_s": 14.21,
+      "error": null
+    },
+    {
+      "name": "Battery Park",
+      "status_code": 200,
+      "matched_count": 1,
+      "returned_count": 5,
+      "best_distance_error_m": 8.199999999999818,
+      "best_mile_range_error_m": 0.0,
+      "response_time_s": 8.36,
+      "error": null
+    },
+    {
+      "name": "Battery Park - longer",
+      "status_code": 200,
+      "matched_count": 0,
+      "returned_count": 5,
+      "best_distance_error_m": 336.3199999999997,
+      "best_mile_range_error_m": 0.0,
+      "response_time_s": 4.25,
+      "error": null
+    },
+    {
+      "name": "Inwood Hill Park",
+      "status_code": 200,
+      "matched_count": 0,
+      "returned_count": 4,
+      "best_distance_error_m": 268.7600000000002,
+      "best_mile_range_error_m": 1253.8392579779597,
+      "response_time_s": 3.28,
+      "error": null
+    },
+    {
+      "name": "Inwood - longer",
+      "status_code": 200,
+      "matched_count": 1,
+      "returned_count": 5,
+      "best_distance_error_m": 55.05999999999949,
+      "best_mile_range_error_m": 0.0,
+      "response_time_s": 3.96,
+      "error": null
+    },
+    {
+      "name": "Upper West Side",
+      "status_code": 200,
+      "matched_count": 0,
+      "returned_count": 5,
+      "best_distance_error_m": 753.0999999999995,
+      "best_mile_range_error_m": 0.0,
+      "response_time_s": 4.1,
+      "error": null
+    },
+    {
+      "name": "Midtown",
+      "status_code": 200,
+      "matched_count": 0,
+      "returned_count": 5,
+      "best_distance_error_m": 320.2399999999998,
+      "best_mile_range_error_m": 0.0,
+      "response_time_s": 3.56,
+      "error": null
+    },
+    {
+      "name": "Chelsea",
+      "status_code": 200,
+      "matched_count": 0,
+      "returned_count": 5,
+      "best_distance_error_m": 446.1799999999985,
+      "best_mile_range_error_m": 0.0,
+      "response_time_s": 4.06,
+      "error": null
+    },
+    {
+      "name": "East Village",
+      "status_code": 200,
+      "matched_count": 0,
+      "returned_count": 5,
+      "best_distance_error_m": 681.3999999999996,
+      "best_mile_range_error_m": 0.0,
+      "response_time_s": 3.91,
+      "error": null
+    },
+    {
+      "name": "Harlem",
+      "status_code": 200,
+      "matched_count": 0,
+      "returned_count": 5,
+      "best_distance_error_m": 284.53999999999905,
+      "best_mile_range_error_m": 0.0,
+      "response_time_s": 4.87,
+      "error": null
+    },
+    {
+      "name": "Washington Heights",
+      "status_code": 200,
+      "matched_count": 0,
+      "returned_count": 5,
+      "best_distance_error_m": 989.6800000000003,
+      "best_mile_range_error_m": 0.0,
+      "response_time_s": 4.41,
+      "error": null
+    },
+    {
+      "name": "Lower East Side",
+      "status_code": 200,
+      "matched_count": 0,
+      "returned_count": 5,
+      "best_distance_error_m": 128.19999999999982,
+      "best_mile_range_error_m": 0.0,
+      "response_time_s": 3.49,
+      "error": null
+    },
+    {
+      "name": "Financial District",
+      "status_code": 200,
+      "matched_count": 0,
+      "returned_count": 5,
+      "best_distance_error_m": 949.5599999999995,
+      "best_mile_range_error_m": 0.0,
+      "response_time_s": 3.87,
+      "error": null
+    },
+    {
+      "name": "Yorkville",
+      "status_code": 200,
+      "matched_count": 1,
+      "returned_count": 5,
+      "best_distance_error_m": 30.360000000000582,
+      "best_mile_range_error_m": 0.0,
+      "response_time_s": 3.47,
+      "error": null
+    },
+    {
+      "name": "Morningside Heights",
+      "status_code": 200,
+      "matched_count": 0,
+      "returned_count": 5,
+      "best_distance_error_m": 728.8799999999992,
+      "best_mile_range_error_m": 0.0,
+      "response_time_s": 4.66,
+      "error": null
+    },
+    {
+      "name": "Tribeca",
+      "status_code": 200,
+      "matched_count": 0,
+      "returned_count": 5,
+      "best_distance_error_m": 1129.5999999999995,
+      "best_mile_range_error_m": 0.0,
+      "response_time_s": 3.89,
+      "error": null
+    }
+  ]
+}
