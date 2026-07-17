@@ -20,6 +20,7 @@ export type RankedRoute = {
   distance_m: number;
   elevation_gain_m: number;
   restroom: RestroomInfo;
+  matched: boolean;
   distance_error_m: number;
   mile_range_error_m: number;
   distance_error_norm: number;
