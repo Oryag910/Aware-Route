@@ -35,16 +35,16 @@ class FakeRoutingProvider:
         self,
         waypoints: list[Coordinate],
     ) -> RouteCandidate:
-        raise NotImplementedError(
-            "this fixture's candidate is never a near-miss, so repair "
-            "should never call this"
-        )
+        # Restroom-first generation may route through this fixture's
+        # restroom (it's within range in several tests) -- simulate
+        # waypoint routing landing on the same shape as the blind loop.
+        return self.candidate
 
 
 class SingleSeedRoutingProvider:
     """Returns one candidate for seed==1 and a different candidate for
     every other seed -- lets tests put exactly one candidate shape into
-    the matched pool out of the GENERATE_CANDIDATE_COUNT candidates
+    the matched pool out of the BLIND_CANDIDATE_COUNT candidates
     main.py requests, with the rest all falling into the fallback
     pool."""
 
@@ -71,10 +71,10 @@ class SingleSeedRoutingProvider:
         self,
         waypoints: list[Coordinate],
     ) -> RouteCandidate:
-        raise NotImplementedError(
-            "this fixture's candidates are never near-misses, so "
-            "repair should never call this"
-        )
+        # Mirrors the "other seed" (fallback) shape, so restroom-first
+        # generation doesn't silently duplicate the crafted matched
+        # candidate in tests that rely on there being exactly one.
+        return self.other_seed_candidate
 
 
 @pytest.fixture(autouse=True)
@@ -295,11 +295,14 @@ def test_routes_with_restroom_backfills_with_fallback_when_understocked() -> Non
         longitude=-74.10,
     )
 
-    # Only seed==1 (out of the 12 internal calls main.py makes via
-    # GENERATE_CANDIDATE_COUNT) produces matched_candidate; seeds 2-12
-    # all produce fallback_candidate. That puts exactly 1 candidate in
-    # the matched pool and 11 in the fallback pool -- fewer matched
-    # candidates than the requested count=5, forcing backfill.
+    # Only seed==1 (out of the 8 internal calls main.py makes via
+    # BLIND_CANDIDATE_COUNT) produces matched_candidate; seeds 2-8 all
+    # produce fallback_candidate. Restroom-first generation also adds
+    # one more fallback_candidate (fallback_restroom is too far away in
+    # a straight line to be eligible, matched_restroom is). That puts
+    # exactly 1 candidate in the matched pool and 8 in the fallback
+    # pool -- fewer matched candidates than the requested count=5,
+    # forcing backfill.
     fake_provider = SingleSeedRoutingProvider(
         first_seed_candidate=matched_candidate,
         other_seed_candidate=fallback_candidate,
@@ -396,10 +399,11 @@ def test_routes_with_restroom_count_slices_after_scoring() -> None:
 
     body = response.json()
 
-    # Scoring internally produces 1 matched + 11 fallback candidates
-    # (12 total, from GENERATE_CANDIDATE_COUNT), but request.count=1
-    # slices the ranked list down to just the top (matched) result --
-    # confirming main.py, not scoring.py, owns the count truncation.
+    # Scoring internally produces 1 matched + 8 fallback candidates (8
+    # blind from BLIND_CANDIDATE_COUNT + 1 more fallback from
+    # restroom-first generation), but request.count=1 slices the
+    # ranked list down to just the top (matched) result -- confirming
+    # main.py, not scoring.py, owns the count truncation.
     assert len(body) == 1
     assert body[0]["matched"] is True
 
@@ -448,3 +452,113 @@ def test_routes_with_restroom_422_only_on_zero_restroom_match_not_hard_constrain
 
     assert len(body) == 1
     assert body[0]["matched"] is False
+
+
+class BlindVsRestroomFirstProvider:
+    """get_loop always returns a candidate whose restroom sits far past
+    the requested mile range; get_route_through_waypoints always
+    returns a different candidate whose restroom sits squarely in
+    range -- isolates restroom-first generation as the only pathway
+    that can produce a real match in this scenario."""
+
+    def __init__(
+        self,
+        blind_candidate: RouteCandidate,
+        restroom_first_candidate: RouteCandidate,
+    ) -> None:
+        self.blind_candidate = blind_candidate
+        self.restroom_first_candidate = restroom_first_candidate
+
+    def get_loop(
+        self,
+        start: Coordinate,
+        target_distance_m: float,
+        seed: int,
+    ) -> RouteCandidate:
+        return self.blind_candidate
+
+    def get_route_through_waypoints(
+        self,
+        waypoints: list[Coordinate],
+    ) -> RouteCandidate:
+        return self.restroom_first_candidate
+
+
+def test_restroom_first_generation_fixes_mile_range_error_blind_candidates_miss() -> None:  # noqa: E501
+    # Same shape/distance (2220.0m, matches target) as the other blind
+    # candidates in this file, but shifted west (-74.10) so its
+    # geometry never comes within RESTROOM_PROXIMITY_THRESHOLD_M of
+    # good_restroom -- it can only ever match bad_restroom.
+    blind_candidate = RouteCandidate(
+        geometry=(
+            RoutePoint(lat=40.70, lon=-74.10, elevation_m=0.0),
+            RoutePoint(lat=40.71, lon=-74.10, elevation_m=10.0),
+            RoutePoint(lat=40.72, lon=-74.10, elevation_m=5.0),
+        ),
+        distance_m=2220.0,
+        elevation_gain_m=10.0,
+    )
+    # Routing through good_restroom as a waypoint reproduces the
+    # standard (40.70/40.71/40.72, lon=-74.00) shape used throughout
+    # this file, putting good_restroom at mile marker ~1112m -- squarely
+    # inside the 0.5-1.0mi (804.67-1609.34m) requested range.
+    restroom_first_candidate = make_candidate()
+
+    good_restroom = make_restroom()
+    bad_restroom = Restroom(
+        source_id="bad-restroom",
+        facility_name="Far Mile Marker Restroom",
+        status="Operational",
+        hours_of_operation=None,
+        accessibility=None,
+        website=None,
+        latitude=40.72,
+        longitude=-74.10,
+    )
+
+    provider = BlindVsRestroomFirstProvider(
+        blind_candidate=blind_candidate,
+        restroom_first_candidate=restroom_first_candidate,
+    )
+
+    app.dependency_overrides[get_routing_provider] = lambda: provider
+    app.dependency_overrides[get_eligible_restrooms] = (
+        lambda: [good_restroom, bad_restroom]
+    )
+
+    response = client.post(
+        "/routes/with-restroom",
+        json={
+            "start_lat": 40.70,
+            "start_lon": -74.00,
+            "target_distance_m": 2220.0,
+            "restroom_min_mile": 0.5,
+            "restroom_max_mile": 1.0,
+            "elevation_preference": "flat",
+            "count": 5,
+        },
+    )
+
+    assert response.status_code == 200
+
+    body = response.json()
+
+    matched_routes = [route for route in body if route["matched"]]
+    fallback_routes = [route for route in body if not route["matched"]]
+
+    # Every blind candidate (all BLIND_CANDIDATE_COUNT seeds return the
+    # same shape) only ever matches bad_restroom, whose mile marker is
+    # ~614m past restroom_max_mile -- restroom-first generation is the
+    # only pathway that produces a route landing good_restroom in range.
+    assert len(matched_routes) == 1
+    assert (
+        matched_routes[0]["restroom"]["facility_name"]
+        == "Test Park Restroom"
+    )
+    assert matched_routes[0]["mile_range_error_m"] == pytest.approx(
+        0.0, abs=5.0
+    )
+
+    assert len(fallback_routes) > 0
+    for route in fallback_routes:
+        assert route["mile_range_error_m"] > 500.0

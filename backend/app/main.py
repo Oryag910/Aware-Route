@@ -9,6 +9,7 @@ from app.restrooms.repository import (
     get_supabase_client,
 )
 from app.restrooms.scoring import score_and_rank_candidates
+from app.restrooms.waypoint_candidates import get_restroom_first_candidates
 from app.routing.candidates import get_loop_candidates
 from app.routing.ors import OpenRouteServiceProvider
 from app.routing.errors import (
@@ -29,12 +30,15 @@ app = FastAPI(title="Aware Running Route API")
 routing_provider = OpenRouteServiceProvider()
 
 # Internal candidate pool size for /routes/with-restroom, independent of
-# the request's `count` (which now only controls how many *ranked*
-# results are returned). 12 gives the scorer a meaningfully larger pool
-# to choose matched/fallback candidates from than the old 3-5, while
-# staying well within ORS's free-tier daily request budget (~2000/day —
-# 12 calls/request supports ~150-200 requests/day).
-GENERATE_CANDIDATE_COUNT = 12
+# the request's `count` (which only controls how many *ranked* results
+# are returned). Split between blind round_trip candidates and
+# restroom-first candidates (routed through a chosen restroom as a
+# waypoint, so the restroom-range axis isn't left to chance). Combined
+# with the repair budget in routing/repair.py, worst case is
+# 8 + 4 + 8 = 20 ORS calls/request (~100 requests/day on the free tier)
+# -- unchanged from before this reallocation.
+BLIND_CANDIDATE_COUNT = 8
+RESTROOM_FIRST_CANDIDATE_LIMIT = 4
 
 
 class RouteRequest(BaseModel):
@@ -143,13 +147,15 @@ def get_routes_with_restroom(
         lat=request.start_lat,
         lon=request.start_lon,
     )
+    min_mile_m = request.restroom_min_mile * 1609.34
+    max_mile_m = request.restroom_max_mile * 1609.34
 
     try:
         candidates = get_loop_candidates(
             provider,
             start,
             request.target_distance_m,
-            GENERATE_CANDIDATE_COUNT,
+            BLIND_CANDIDATE_COUNT,
         )
     except RouteNotFoundError as exc:
         raise HTTPException(
@@ -162,6 +168,15 @@ def get_routes_with_restroom(
             detail=str(exc),
         ) from exc
 
+    candidates = candidates + get_restroom_first_candidates(
+        provider,
+        start,
+        restrooms,
+        min_mile_m,
+        max_mile_m,
+        RESTROOM_FIRST_CANDIDATE_LIMIT,
+    )
+
     candidates = repair_near_miss_candidates(
         provider,
         candidates,
@@ -173,8 +188,8 @@ def get_routes_with_restroom(
         candidates,
         restrooms,
         request.target_distance_m,
-        request.restroom_min_mile * 1609.34,
-        request.restroom_max_mile * 1609.34,
+        min_mile_m,
+        max_mile_m,
         preferred_elevation_bucket=request.elevation_preference,
     )
 
