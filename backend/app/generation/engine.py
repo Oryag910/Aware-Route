@@ -1,5 +1,7 @@
 from typing import Any, Literal
 
+from app.amenities.snapping import SnappedAmenity
+from app.generation.amenity_first import generate_through_amenities
 from app.generation.length_tune import tune_generator_to_target
 from app.generation.out_and_back import out_and_back_pairs
 from app.generation.round_route import round_pairs
@@ -71,6 +73,54 @@ def generate_candidates(
         key=lambda candidate: isoperimetric_quotient(candidate.geometry),
         reverse=True,
     )
+    return combined[:count]
+
+
+def generate_amenity_aware(
+    graph: Any,
+    start: Coordinate,
+    target_distance_m: float,
+    shape: Shape,
+    count: int,
+    snapped: list[SnappedAmenity],
+    min_range_m: float,
+    max_range_m: float,
+) -> list[RouteCandidate]:
+    """Amenity-aware variant of `generate_candidates`.
+
+    Unions the amenity-passing pool from `generate_through_amenities`
+    with the ordinary shape-based pool, dedups, and returns the best
+    `count` -- amenity-passing candidates are listed first since they
+    satisfy a strictly harder constraint, then the rest fill out the
+    count ranked by distance accuracy (round/mix also weigh roundness).
+    """
+    amenity_pool = generate_through_amenities(
+        graph,
+        start,
+        target_distance_m,
+        snapped,
+        min_range_m,
+        max_range_m,
+        shape,
+        count,
+    )
+
+    fallback_pool = generate_candidates(graph, start, target_distance_m, shape, count)
+
+    combined = _dedup(amenity_pool + fallback_pool)
+
+    amenity_keys = {
+        tuple((point.lat, point.lon) for point in candidate.geometry)
+        for candidate in amenity_pool
+    }
+
+    def sort_key(candidate: RouteCandidate) -> tuple[int, float]:
+        key = tuple((point.lat, point.lon) for point in candidate.geometry)
+        is_fallback = 0 if key in amenity_keys else 1
+        return (is_fallback, abs(candidate.distance_m - target_distance_m))
+
+    combined.sort(key=sort_key)
+
     return combined[:count]
 
 
