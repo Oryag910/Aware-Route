@@ -124,11 +124,14 @@ def pedestrian_share(graph: Any, node_path: list[int]) -> float:
     for. Returns 0.0 for a path with fewer than two nodes.
     """
     breakdown = waytype_breakdown(graph, node_path)
-    return sum(
+    share = sum(
         share
         for highway, share in breakdown.items()
         if highway in PEDESTRIAN_HIGHWAY_CLASSES
     )
+    # Length shares are summed floats, so an all-pedestrian route can
+    # land a hair over 1.0 -- clamp so callers/response never see >1.0.
+    return min(share, 1.0)
 
 
 def elevation_gain_from_nodes(graph: Any, node_path: list[int]) -> float | None:

@@ -1,3 +1,4 @@
+import logging
 import os
 from datetime import datetime
 from typing import Annotated, Literal
@@ -6,10 +7,18 @@ from fastapi import Depends, FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
+from app.amenities.fountains import fountain_to_amenity, get_fountains
+from app.amenities.models import Amenity
+from app.amenities.snapping import snap_amenities
 from app.flow.interruptions import (
     InterruptionStore,
     get_interruption_store as _get_interruption_store,
+    route_interruptions,
 )
+from app.flow.shape import compactness, sharp_turn_count, u_turn_count
+from app.generation.engine import generate_routes
+from app.generation.local_scoring import LocalScoredRoute, score_local_routes
+from app.graph.loader import get_graph
 from app.rate_limit import rate_limit_dependency
 from app.restrooms.archetypes import assign_archetypes
 from app.restrooms.hours import confidently_closed
@@ -40,6 +49,8 @@ from app.routing.provider import (
     RoutingProvider,
 )
 
+
+logger = logging.getLogger(__name__)
 
 app = FastAPI(title="Aware Running Route API")
 
@@ -78,6 +89,13 @@ RESTROOM_FIRST_CANDIDATE_LIMIT = 4
 # displace genuinely-close candidates -- drop them outright.
 MAX_CANDIDATE_DISTANCE_RATIO = 3.0
 
+# Route-generation engine: "ors" (default, the legacy OpenRouteService
+# pipeline) or "local" (the in-process OSMnx walk graph). Set via env so
+# switching -- or rolling back -- is a deploy-time flag, not a code change.
+# Defaults to "ors" so production behaviour is unchanged until explicitly
+# flipped.
+ROUTING_ENGINE = os.environ.get("ROUTING_ENGINE", "ors").strip().lower()
+
 
 class RouteRequest(BaseModel):
     start_lat: float
@@ -93,6 +111,10 @@ class RestroomRouteRequest(BaseModel):
     restroom_min_mile: Annotated[float, Field(ge=0)]
     restroom_max_mile: Annotated[float, Field(gt=0)]
     elevation_preference: Literal["flat", "moderate", "hilly"]
+    # Route shape, used only by the local engine (ROUTING_ENGINE=local);
+    # the ORS pipeline ignores it. Defaults to "mix" so existing clients
+    # that don't send it keep working.
+    shape: Literal["round", "out_and_back", "mix"] = "mix"
     count: Annotated[int, Field(ge=1, le=5)] = 3
     # A naive (no timezone) datetime is treated as local wall-clock
     # time -- callers are expected to send local time, not UTC. None
@@ -195,6 +217,163 @@ def get_routes(
         ) from exc
 
 
+def _local_response(
+    scored: LocalScoredRoute,
+    interruption_store: InterruptionStore,
+    amenity_meta: dict[tuple[float, float], tuple[str, str, str | None]],
+) -> RankedRouteResponse:
+    """Map a locally-scored route onto the shared response contract so
+    the frontend needs no changes. `scored.best_amenity` is guaranteed
+    non-None by the caller (routes without an on-route amenity are
+    dropped). Elevation-profile detail (per-climb grades) is not yet
+    surfaced by the local engine, so those fields report neutral values;
+    smoothed_gain_m carries the graph-node elevation gain."""
+    candidate = scored.route.candidate
+    quality = scored.route.quality
+    geometry = candidate.geometry
+    interruptions = route_interruptions(geometry, interruption_store)
+
+    assert scored.best_amenity is not None
+    amenity = scored.best_amenity.amenity
+    key = (round(amenity.lat, 6), round(amenity.lon, 6))
+    name, status, hours = amenity_meta.get(
+        key, (amenity.name or "", "", None)
+    )
+
+    smoothed_gain = (
+        quality.elevation_gain_m
+        if quality.elevation_gain_m is not None
+        else 0.0
+    )
+
+    return RankedRouteResponse(
+        geometry=geometry,
+        distance_m=candidate.distance_m,
+        elevation_gain_m=smoothed_gain,
+        restroom=RestroomInfo(
+            facility_name=name,
+            status=status,
+            hours_of_operation=hours,
+            latitude=amenity.lat,
+            longitude=amenity.lon,
+            mile_marker_m=scored.best_amenity.mile_marker_m,
+        ),
+        matched=scored.matched,
+        off_route_distance_m=scored.off_route_distance_m,
+        distance_error_m=scored.distance_error_m,
+        mile_range_error_m=scored.amenity_range_error_m,
+        distance_error_norm=0.0,
+        mile_range_error_norm=0.0,
+        elevation_mismatch=scored.elevation_penalty,
+        repeated_segment_ratio=quality.edge_reuse_ratio,
+        restroom_confidence=1.0,
+        similarity_penalty=scored.similarity_penalty,
+        composite_score=scored.composite_score,
+        signal_count=interruptions.signal_count,
+        crossing_count=interruptions.crossing_count,
+        longest_uninterrupted_m=interruptions.longest_uninterrupted_m,
+        signals_per_km=interruptions.signals_per_km,
+        pedestrian_path_ratio=quality.pedestrian_share,
+        contains_stairs=quality.waytype_breakdown.get("steps", 0.0) > 0.0,
+        sharp_turn_count=sharp_turn_count(geometry),
+        u_turn_count=u_turn_count(geometry),
+        compactness=compactness(geometry),
+        smoothed_gain_m=smoothed_gain,
+        climb_count=0,
+        longest_climb_m=0.0,
+        longest_climb_grade_pct=0.0,
+        max_grade_pct=0.0,
+        archetype=None,
+    )
+
+
+def _build_local_responses(
+    request: "RestroomRouteRequest",
+    restrooms: list[Restroom],
+    interruption_store: InterruptionStore,
+) -> list[RankedRouteResponse]:
+    """The in-process local-graph pipeline for /routes/with-restroom.
+
+    Restrooms (from Supabase) and water fountains (from the ingested
+    dataset) are treated as a single amenity pool; routes are generated
+    through an in-range amenity, then ranked by the local scorer. Raises
+    422 (honest no-match) when no route passes any eligible amenity in
+    range -- the caller must NOT fall back to ORS on that, only on
+    unexpected exceptions."""
+    graph = get_graph()
+    start = Coordinate(lat=request.start_lat, lon=request.start_lon)
+    min_mile_m = request.restroom_min_mile * 1609.34
+    max_mile_m = request.restroom_max_mile * 1609.34
+    effective_run_time = request.run_time or datetime.now()
+
+    open_restrooms = [
+        restroom
+        for restroom in restrooms
+        if not confidently_closed(restroom, effective_run_time)
+    ]
+    fountains = get_fountains()
+
+    amenities = [
+        Amenity(
+            lat=restroom.latitude,
+            lon=restroom.longitude,
+            kind="restroom",
+            name=restroom.facility_name,
+        )
+        for restroom in open_restrooms
+    ] + [fountain_to_amenity(fountain) for fountain in fountains]
+
+    # (lat, lon) -> (name, status, hours) so the response can recover the
+    # real facility metadata the generic Amenity doesn't carry.
+    amenity_meta: dict[tuple[float, float], tuple[str, str, str | None]] = {}
+    for restroom in open_restrooms:
+        amenity_meta[
+            (round(restroom.latitude, 6), round(restroom.longitude, 6))
+        ] = (restroom.facility_name, restroom.status, restroom.hours_of_operation)
+    for fountain in fountains:
+        amenity_meta[
+            (round(fountain.latitude, 6), round(fountain.longitude, 6))
+        ] = (fountain.name or "Water fountain", "Operational", None)
+
+    snapped = snap_amenities(graph, amenities, max_snap_m=200.0)
+
+    routes = generate_routes(
+        graph,
+        start,
+        request.target_distance_m,
+        request.shape,
+        request.count,
+        snapped=snapped,
+        min_range_m=min_mile_m,
+        max_range_m=max_mile_m,
+    )
+
+    scored = score_local_routes(
+        routes,
+        amenities,
+        request.target_distance_m,
+        min_mile_m,
+        max_mile_m,
+        request.elevation_preference,
+        request.shape,
+        interruption_store,
+        request.count,
+    )
+
+    with_amenity = [s for s in scored if s.best_amenity is not None]
+
+    if not with_amenity:
+        raise HTTPException(
+            status_code=422,
+            detail="No candidate route passed an eligible restroom in range",
+        )
+
+    return [
+        _local_response(s, interruption_store, amenity_meta)
+        for s in with_amenity
+    ]
+
+
 @app.post(
     "/routes/with-restroom",
     dependencies=[Depends(rate_limit_dependency)],
@@ -214,6 +393,23 @@ def get_routes_with_restroom(
         Depends(get_interruption_store),
     ],
 ) -> list[RankedRouteResponse]:
+    if ROUTING_ENGINE == "local":
+        try:
+            return _build_local_responses(
+                request, restrooms, interruption_store
+            )
+        except HTTPException:
+            # Honest no-match (422) or client error: return it, do NOT
+            # fall back to ORS.
+            raise
+        except Exception:
+            # Graph-load failure or an unexpected local-engine error:
+            # fall back to the ORS pipeline below so the request still
+            # succeeds while the local engine is stabilised.
+            logger.exception(
+                "Local routing engine failed; falling back to ORS"
+            )
+
     start = Coordinate(
         lat=request.start_lat,
         lon=request.start_lon,
