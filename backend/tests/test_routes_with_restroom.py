@@ -725,3 +725,58 @@ def test_routes_with_restroom_accepts_workout_type() -> None:
 
     assert response.status_code == 200
     assert len(response.json()) == 1
+
+
+def test_pathological_blind_candidates_are_dropped() -> None:
+    matched_candidate = make_candidate()
+    # 30km for a 2.22km ask -- the kind of degenerate loop ORS
+    # round_trip occasionally returns. Same geometry as the matched
+    # candidate so it would match the restroom if it survived.
+    pathological = RouteCandidate(
+        geometry=matched_candidate.geometry,
+        distance_m=30_000.0,
+        elevation_gain_m=10.0,
+    )
+    restroom = make_restroom()
+
+    fake_provider = SingleSeedRoutingProvider(
+        first_seed_candidate=matched_candidate,
+        other_seed_candidate=pathological,
+    )
+
+    app.dependency_overrides[get_routing_provider] = (
+        lambda: fake_provider
+    )
+    app.dependency_overrides[get_eligible_restrooms] = (
+        lambda: [restroom]
+    )
+
+    response = client.post(
+        "/routes/with-restroom",
+        json={
+            "start_lat": 40.70,
+            "start_lon": -74.00,
+            "target_distance_m": 2220.0,
+            "restroom_min_mile": 0.5,
+            "restroom_max_mile": 1.0,
+            "elevation_preference": "flat",
+            "count": 5,
+            "run_time": "2026-01-01T12:00:00",
+        },
+    )
+
+    assert response.status_code == 200
+
+    body = response.json()
+
+    # Blind seeds 2-8 all return the 30km loop and are dropped by the
+    # 3x-target sanity filter, leaving seed 1's matched candidate.
+    # Restroom-first generation (deliberately unfiltered -- waypoint
+    # routes are real routes, not round_trip pathologies) contributes
+    # one more 30km fallback via this fake provider, so exactly two
+    # routes come back instead of five near-identical 30km ones.
+    assert len(body) == 2
+    assert body[0]["matched"] is True
+    assert body[0]["distance_m"] == pytest.approx(2220.0)
+    assert body[1]["matched"] is False
+    assert body[1]["distance_m"] == pytest.approx(30_000.0)

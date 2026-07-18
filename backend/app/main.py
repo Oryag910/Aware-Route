@@ -53,6 +53,12 @@ routing_provider = OpenRouteServiceProvider()
 BLIND_CANDIDATE_COUNT = 8
 RESTROOM_FIRST_CANDIDATE_LIMIT = 4
 
+# ORS round_trip occasionally returns pathological loops (observed
+# live: 29km and 723km for a 9.7km ask). They're far beyond repair's
+# rescue band, so they'd only ever clutter the fallback ranking and
+# displace genuinely-close candidates -- drop them outright.
+MAX_CANDIDATE_DISTANCE_RATIO = 3.0
+
 
 class RouteRequest(BaseModel):
     start_lat: float
@@ -220,6 +226,13 @@ def get_routes_with_restroom(
             status_code=502,
             detail=str(exc),
         ) from exc
+
+    candidates = [
+        candidate
+        for candidate in candidates
+        if candidate.distance_m
+        <= MAX_CANDIDATE_DISTANCE_RATIO * request.target_distance_m
+    ]
 
     restroom_first = get_restroom_first_candidates(
         provider,
