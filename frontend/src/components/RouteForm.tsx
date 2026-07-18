@@ -43,99 +43,130 @@ export default function RouteForm({
     });
   }
 
+  const labelClass = "block text-sm font-medium text-slate-700 mb-1";
+  const controlClass =
+    "w-full rounded-md border border-slate-300 px-3 py-2 text-sm focus:border-blue-600 focus:outline-none focus:ring-1 focus:ring-blue-600";
+
   return (
-    <form onSubmit={handleSubmit}>
-      <div>
-        <label htmlFor="target-distance">Target distance in miles</label>
-        <input
-          id="target-distance"
-          type="number"
-          min="0.1"
-          step="0.1"
-          value={targetDistanceMiles}
-          onChange={(event) => setTargetDistanceMiles(event.target.value)}
-          required
-        />
-      </div>
+    <form onSubmit={handleSubmit} className="space-y-4">
+      <h2 className="text-lg font-semibold text-slate-900">
+        Route preferences
+      </h2>
 
-      <div>
-        <label htmlFor="restroom-min-mile">Restroom minimum mile</label>
-        <input
-          id="restroom-min-mile"
-          type="number"
-          min="0"
-          step="0.1"
-          value={restroomMinMile}
-          onChange={(event) => setRestroomMinMile(event.target.value)}
-          required
-        />
-      </div>
+      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+        <div>
+          <label htmlFor="target-distance" className={labelClass}>
+            Target distance in miles
+          </label>
+          <input
+            id="target-distance"
+            type="number"
+            min="0.1"
+            step="0.1"
+            value={targetDistanceMiles}
+            onChange={(event) => setTargetDistanceMiles(event.target.value)}
+            required
+            className={controlClass}
+          />
+        </div>
 
-      <div>
-        <label htmlFor="restroom-max-mile">Restroom maximum mile</label>
-        <input
-          id="restroom-max-mile"
-          type="number"
-          min="0"
-          step="0.1"
-          value={restroomMaxMile}
-          onChange={(event) => setRestroomMaxMile(event.target.value)}
-          required
-        />
-      </div>
+        <div>
+          <label htmlFor="elevation-preference" className={labelClass}>
+            Elevation preference
+          </label>
+          <select
+            id="elevation-preference"
+            value={elevationPreference}
+            onChange={(event) =>
+              setElevationPreference(
+                event.target.value as ElevationPreference,
+              )
+            }
+            className={controlClass}
+          >
+            <option value="flat">Flat</option>
+            <option value="moderate">Moderate</option>
+            <option value="hilly">Hilly</option>
+          </select>
+        </div>
 
-      <div>
-        <label htmlFor="elevation-preference">Elevation preference</label>
-        <select
-          id="elevation-preference"
-          value={elevationPreference}
-          onChange={(event) =>
-            setElevationPreference(
-              event.target.value as ElevationPreference,
-            )
-          }
-        >
-          <option value="flat">Flat</option>
-          <option value="moderate">Moderate</option>
-          <option value="hilly">Hilly</option>
-        </select>
-      </div>
+        <div>
+          <label htmlFor="restroom-min-mile" className={labelClass}>
+            Restroom minimum mile
+          </label>
+          <input
+            id="restroom-min-mile"
+            type="number"
+            min="0"
+            step="0.1"
+            value={restroomMinMile}
+            onChange={(event) => setRestroomMinMile(event.target.value)}
+            required
+            className={controlClass}
+          />
+        </div>
 
-      <div>
-        <label htmlFor="run-time">Run time (optional)</label>
-        <input
-          id="run-time"
-          type="datetime-local"
-          value={runTime}
-          onChange={(event) => setRunTime(event.target.value)}
-        />
-      </div>
+        <div>
+          <label htmlFor="restroom-max-mile" className={labelClass}>
+            Restroom maximum mile
+          </label>
+          <input
+            id="restroom-max-mile"
+            type="number"
+            min="0"
+            step="0.1"
+            value={restroomMaxMile}
+            onChange={(event) => setRestroomMaxMile(event.target.value)}
+            required
+            className={controlClass}
+          />
+        </div>
 
-      <div>
-        <label htmlFor="workout-type">Workout type</label>
-        <select
-          id="workout-type"
-          value={workoutType}
-          onChange={(event) => setWorkoutType(event.target.value)}
-        >
-          <option value="">Any run</option>
-          <option value="easy">Easy</option>
-          <option value="tempo">Tempo</option>
-          <option value="long">Long</option>
-          <option value="hills">Hills</option>
-          <option value="intervals">Intervals</option>
-        </select>
+        <div>
+          <label htmlFor="run-time" className={labelClass}>
+            Run time (optional)
+          </label>
+          <input
+            id="run-time"
+            type="datetime-local"
+            value={runTime}
+            onChange={(event) => setRunTime(event.target.value)}
+            className={controlClass}
+          />
+        </div>
+
+        <div>
+          <label htmlFor="workout-type" className={labelClass}>
+            Workout type
+          </label>
+          <select
+            id="workout-type"
+            value={workoutType}
+            onChange={(event) => setWorkoutType(event.target.value)}
+            className={controlClass}
+          >
+            <option value="">Any run</option>
+            <option value="easy">Easy</option>
+            <option value="tempo">Tempo</option>
+            <option value="long">Long</option>
+            <option value="hills">Hills</option>
+            <option value="intervals">Intervals</option>
+          </select>
+        </div>
       </div>
 
       <button
         type="submit"
         disabled={startPosition === null || isLoading}
+        className="w-full rounded-md bg-blue-600 px-4 py-2 text-sm font-semibold text-white hover:bg-blue-700 disabled:cursor-not-allowed disabled:bg-slate-300"
       >
         {isLoading ? "Generating..." : "Generate Route"}
       </button>
 
       {startPosition === null && (
-        <p>Select a starting point on the map first.</p>
+        <p className="text-sm text-slate-500">
+          Select a starting point on the map first.
+        </p>
       )}
     </form>
   );

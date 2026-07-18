@@ -50,7 +50,7 @@ export default function Map({
     <MapContainer
       center={[40.7831, -73.9712]}
       zoom={13}
-      style={{ height: "500px", width: "100%" }}
+      className="h-[70vh] w-full md:h-full"
     >
       <TileLayer
         attribution="© OpenStreetMap contributors"
