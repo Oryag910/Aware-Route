@@ -2,11 +2,14 @@ import { useState, type FormEvent } from "react";
 
 export type ElevationPreference = "flat" | "moderate" | "hilly";
 
+export type RouteShape = "round" | "out_and_back" | "mix";
+
 export type RouteFormValues = {
   targetDistanceMiles: number;
   restroomMinMile: number;
   restroomMaxMile: number;
   elevationPreference: ElevationPreference;
+  shape: RouteShape;
   runTime: string;
   workoutType: string;
 };
@@ -27,6 +30,7 @@ export default function RouteForm({
   const [restroomMaxMile, setRestroomMaxMile] = useState("4");
   const [elevationPreference, setElevationPreference] =
     useState<ElevationPreference>("moderate");
+  const [shape, setShape] = useState<RouteShape>("mix");
   const [runTime, setRunTime] = useState("");
   const [workoutType, setWorkoutType] = useState("");
 
@@ -38,6 +42,7 @@ export default function RouteForm({
       restroomMinMile: Number(restroomMinMile),
       restroomMaxMile: Number(restroomMaxMile),
       elevationPreference,
+      shape,
       runTime,
       workoutType,
     });
@@ -87,6 +92,22 @@ export default function RouteForm({
             <option value="flat">Flat</option>
             <option value="moderate">Moderate</option>
             <option value="hilly">Hilly</option>
+          </select>
+        </div>
+
+        <div>
+          <label htmlFor="route-shape" className={labelClass}>
+            Route shape
+          </label>
+          <select
+            id="route-shape"
+            value={shape}
+            onChange={(event) => setShape(event.target.value as RouteShape)}
+            className={controlClass}
+          >
+            <option value="mix">Mixed (best overall)</option>
+            <option value="round">Round (loop)</option>
+            <option value="out_and_back">Out &amp; back</option>
           </select>
         </div>
 
