@@ -144,10 +144,15 @@ def generate_routes(
         for route in amenity_pool
     }
 
-    def sort_key(route: GeneratedRoute) -> tuple[int, float]:
+    def sort_key(route: GeneratedRoute) -> tuple[int, float, float]:
         key = tuple((point.lat, point.lon) for point in route.candidate.geometry)
         is_fallback = 0 if key in amenity_keys else 1
-        return (is_fallback, abs(route.candidate.distance_m - target_distance_m))
+        distance_error = abs(route.candidate.distance_m - target_distance_m)
+        if shape == "out_and_back":
+            return (is_fallback, 0.0, distance_error)
+        # round/mix: prefer rounder routes so genuine loops outrank the
+        # out-and-backs that only happen to fit the target distance better.
+        return (is_fallback, -route.quality.isoperimetric_quotient, distance_error)
 
     combined.sort(key=sort_key)
 

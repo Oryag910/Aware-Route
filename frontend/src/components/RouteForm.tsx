@@ -1,6 +1,6 @@
 import { useState, type FormEvent } from "react";
 
-export type ElevationPreference = "flat" | "moderate" | "hilly";
+export type ElevationPreference = "flat" | "moderate" | "hilly" | "any";
 
 export type RouteShape = "round" | "out_and_back" | "mix";
 
@@ -92,6 +92,7 @@ export default function RouteForm({
             <option value="flat">Flat</option>
             <option value="moderate">Moderate</option>
             <option value="hilly">Hilly</option>
+            <option value="any">Doesn't matter</option>
           </select>
         </div>
 

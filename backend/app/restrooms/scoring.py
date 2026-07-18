@@ -234,6 +234,11 @@ def elevation_mismatch_norm(
     candidate: RouteCandidate,
     preferred_bucket: str,
 ) -> float:
+    # "any" preference: the runner doesn't care about elevation, so this
+    # factor is neutral -- no mismatch regardless of the route's profile.
+    if preferred_bucket == "any":
+        return 0.0
+
     # Fewer than 2 geometry points means the smoothed profile can't be
     # computed (smooth_elevations/detect_climbs both degrade to
     # raw/empty) -- this keeps degenerate or synthetic candidates (e.g.

@@ -110,7 +110,7 @@ class RestroomRouteRequest(BaseModel):
     target_distance_m: Annotated[float, Field(gt=0)]
     restroom_min_mile: Annotated[float, Field(ge=0)]
     restroom_max_mile: Annotated[float, Field(gt=0)]
-    elevation_preference: Literal["flat", "moderate", "hilly"]
+    elevation_preference: Literal["flat", "moderate", "hilly", "any"]
     # Route shape, used only by the local engine (ROUTING_ENGINE=local);
     # the ORS pipeline ignores it. Defaults to "mix" so existing clients
     # that don't send it keep working.
