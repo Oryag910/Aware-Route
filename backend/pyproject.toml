@@ -10,6 +10,6 @@ strict = true
 # Treat them as untyped at the boundary -- our own graph code stays
 # strict, these libraries return Any.
 [[tool.mypy.overrides]]
-module = ["osmnx.*", "osmnx", "networkx.*", "networkx"]
+module = ["osmnx.*", "osmnx", "networkx.*", "networkx", "shapely.*", "shapely"]
 follow_imports = "skip"
 ignore_missing_imports = true
