@@ -10,6 +10,7 @@ from app.main import (
     get_interruption_store,
     get_routing_provider,
 )
+from app.rate_limit import rate_limit_dependency
 from app.restrooms.models import Restroom
 from app.routing.provider import (
     Coordinate,
@@ -94,6 +95,12 @@ def clear_dependency_overrides() -> Iterator[None]:
     app.dependency_overrides[get_interruption_store] = (
         lambda: EMPTY_INTERRUPTION_STORE
     )
+
+    # These tests all share TestClient's single "testclient" IP, and
+    # the module makes enough requests to sit at the 10/IP/hour demo
+    # cap -- disable rate limiting here so adding one more test can't
+    # start tripping mystery 429s (rate limiting has its own tests).
+    app.dependency_overrides[rate_limit_dependency] = lambda: None
 
     yield
 
