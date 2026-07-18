@@ -40,6 +40,12 @@ data/processed/
 generated/
 exports/
 
+# OSMnx Overpass response cache
+backend/cache/
+
+# Large regenerable routing graph (rebuild via scripts/build_graph.py)
+backend/data/manhattan_walk_graph.*
+
 # Editor files
 .vscode/
 .idea/

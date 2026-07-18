@@ -4,3 +4,12 @@ line-length = 100
 [tool.mypy]
 python_version = "3.14"
 strict = true
+
+# OSMnx and NetworkX ship no type information; without skipping their
+# imports, mypy crawls their (huge) dependency trees and times out.
+# Treat them as untyped at the boundary -- our own graph code stays
+# strict, these libraries return Any.
+[[tool.mypy.overrides]]
+module = ["osmnx.*", "osmnx", "networkx.*", "networkx"]
+follow_imports = "skip"
+ignore_missing_imports = true
