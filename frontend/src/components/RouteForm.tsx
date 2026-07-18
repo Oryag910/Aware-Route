@@ -8,6 +8,7 @@ export type RouteFormValues = {
   restroomMaxMile: number;
   elevationPreference: ElevationPreference;
   runTime: string;
+  workoutType: string;
 };
 
 type RouteFormProps = {
@@ -27,6 +28,7 @@ export default function RouteForm({
   const [elevationPreference, setElevationPreference] =
     useState<ElevationPreference>("moderate");
   const [runTime, setRunTime] = useState("");
+  const [workoutType, setWorkoutType] = useState("");
 
   function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -37,6 +39,7 @@ export default function RouteForm({
       restroomMaxMile: Number(restroomMaxMile),
       elevationPreference,
       runTime,
+      workoutType,
     });
   }
 
@@ -106,6 +109,22 @@ export default function RouteForm({
           value={runTime}
           onChange={(event) => setRunTime(event.target.value)}
         />
+      </div>
+
+      <div>
+        <label htmlFor="workout-type">Workout type</label>
+        <select
+          id="workout-type"
+          value={workoutType}
+          onChange={(event) => setWorkoutType(event.target.value)}
+        >
+          <option value="">Any run</option>
+          <option value="easy">Easy</option>
+          <option value="tempo">Tempo</option>
+          <option value="long">Long</option>
+          <option value="hills">Hills</option>
+          <option value="intervals">Intervals</option>
+        </select>
       </div>
 
       <button

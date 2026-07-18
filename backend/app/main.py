@@ -8,6 +8,7 @@ from app.flow.interruptions import (
     InterruptionStore,
     get_interruption_store as _get_interruption_store,
 )
+from app.restrooms.archetypes import assign_archetypes
 from app.restrooms.hours import confidently_closed
 from app.restrooms.models import Restroom
 from app.restrooms.repository import (
@@ -72,6 +73,9 @@ class RestroomRouteRequest(BaseModel):
     # time -- callers are expected to send local time, not UTC. None
     # means "now".
     run_time: datetime | None = None
+    workout_type: Literal[
+        "easy", "tempo", "long", "hills", "intervals"
+    ] | None = None
 
 
 class RestroomInfo(BaseModel):
@@ -113,6 +117,7 @@ class RankedRouteResponse(BaseModel):
     longest_climb_m: float
     longest_climb_grade_pct: float
     max_grade_pct: float
+    archetype: str | None
 
 
 def get_routing_provider() -> RoutingProvider:
@@ -287,6 +292,7 @@ def get_routes_with_restroom(
         max_mile_m,
         preferred_elevation_bucket=request.elevation_preference,
         interruption_store=interruption_store,
+        workout_type=request.workout_type,
     )
 
     if not scored_candidates:
@@ -296,6 +302,9 @@ def get_routes_with_restroom(
                 "No candidate route passed an eligible restroom in range"
             ),
         )
+
+    sliced_candidates = scored_candidates[: request.count]
+    archetypes = assign_archetypes(sliced_candidates)
 
     return [
         RankedRouteResponse(
@@ -339,6 +348,7 @@ def get_routes_with_restroom(
             longest_climb_m=scored.longest_climb_m,
             longest_climb_grade_pct=scored.longest_climb_grade_pct,
             max_grade_pct=scored.max_grade_pct,
+            archetype=archetype,
         )
-        for scored in scored_candidates[: request.count]
+        for scored, archetype in zip(sliced_candidates, archetypes)
     ]

@@ -7,6 +7,7 @@ from app.restrooms.geo import RESTROOM_PROXIMITY_THRESHOLD_M, RestroomMatch
 from app.restrooms.models import Restroom
 from app.restrooms.scoring import (
     WEIGHT_OFF_ROUTE,
+    WEIGHT_PROFILES,
     best_match_for_range,
     best_restroom_waypoint,
     elevation_bucket,
@@ -917,3 +918,281 @@ def test_best_restroom_waypoint_returns_none_without_a_match() -> None:
     )
 
     assert waypoint is None
+
+
+# --- Workout presets (Phase F) ---------------------------------------
+
+
+def test_weight_profiles_all_normalize_to_one() -> None:
+    for profile in WEIGHT_PROFILES.values():
+        total = (
+            profile.elevation
+            + profile.repeated_segment
+            + profile.interruption
+            + profile.similarity
+            + profile.restroom_confidence
+            + profile.off_route
+            + profile.turns
+            + profile.street
+        )
+
+        assert total == pytest.approx(1.0, abs=1e-9)
+
+
+def test_unknown_workout_type_raises_value_error() -> None:
+    candidate = make_candidate(
+        start_lat=40.70, longitude=-74.00, distance_m=1000.0
+    )
+    restroom = make_restroom(
+        source_id="shared", latitude=40.70, longitude=-74.00
+    )
+
+    with pytest.raises(ValueError):
+        score_and_rank_candidates(
+            candidates=[candidate],
+            restrooms=[restroom],
+            target_distance_m=1000.0,
+            min_mile_m=0.0,
+            max_mile_m=100.0,
+            preferred_elevation_bucket="flat",
+            interruption_store=EMPTY_INTERRUPTION_STORE,
+            workout_type="marathon",
+        )
+
+
+def make_zigzag_candidate(
+    longitude: float,
+    distance_m: float = 333.0,
+) -> RouteCandidate:
+    # A 4-point staircase with two ~90-degree turns, each leg ~111m
+    # (comfortably over shape.py's MIN_LEG_M=15m so each vertex counts
+    # as a real turn, not vertex jitter). Flat elevation throughout, so
+    # this isolates turn density from the elevation-mismatch factor.
+    geometry = (
+        RoutePoint(lat=40.70, lon=longitude, elevation_m=0.0),
+        RoutePoint(lat=40.70, lon=longitude + 0.001, elevation_m=0.0),
+        RoutePoint(
+            lat=40.701, lon=longitude + 0.001, elevation_m=0.0
+        ),
+        RoutePoint(
+            lat=40.701, lon=longitude + 0.002, elevation_m=0.0
+        ),
+    )
+
+    return RouteCandidate(
+        geometry=geometry,
+        distance_m=distance_m,
+        elevation_gain_m=0.0,
+    )
+
+
+def make_straight_candidate(
+    longitude: float,
+    distance_m: float = 333.0,
+) -> RouteCandidate:
+    # Same point count/spacing/elevation as make_zigzag_candidate, but
+    # collinear -- zero turns, isolating turn density as the only
+    # differing factor between the two.
+    geometry = tuple(
+        RoutePoint(
+            lat=40.70,
+            lon=longitude + 0.001 * index,
+            elevation_m=0.0,
+        )
+        for index in range(4)
+    )
+
+    return RouteCandidate(
+        geometry=geometry,
+        distance_m=distance_m,
+        elevation_gain_m=0.0,
+    )
+
+
+def test_intervals_preset_penalizes_turn_density_default_does_not() -> None:  # noqa: E501
+    # Both candidates are flat (elevation_mismatch=0), matched to their
+    # own nearby restroom (identical confidence, on-route), and never
+    # overlap each other for similarity purposes (shifted apart in
+    # longitude) -- the only differing composite input is turn density
+    # (zigzag has 2 sharp turns, straight has 0).
+    zigzag_candidate = make_zigzag_candidate(longitude=-74.00)
+    straight_candidate = make_straight_candidate(longitude=-73.50)
+
+    zigzag_restroom = make_restroom(
+        source_id="zigzag", latitude=40.70, longitude=-74.00
+    )
+    straight_restroom = make_restroom(
+        source_id="straight", latitude=40.70, longitude=-73.50
+    )
+
+    default_result = score_and_rank_candidates(
+        candidates=[zigzag_candidate, straight_candidate],
+        restrooms=[zigzag_restroom, straight_restroom],
+        target_distance_m=333.0,
+        min_mile_m=0.0,
+        max_mile_m=1000.0,
+        preferred_elevation_bucket="flat",
+        interruption_store=EMPTY_INTERRUPTION_STORE,
+        workout_type=None,
+    )
+
+    intervals_result = score_and_rank_candidates(
+        candidates=[zigzag_candidate, straight_candidate],
+        restrooms=[zigzag_restroom, straight_restroom],
+        target_distance_m=333.0,
+        min_mile_m=0.0,
+        max_mile_m=1000.0,
+        preferred_elevation_bucket="flat",
+        interruption_store=EMPTY_INTERRUPTION_STORE,
+        workout_type="intervals",
+    )
+
+    # Default weights don't score turn density at all (turns weight is
+    # 0), so the two candidates tie on every scored factor and the sort
+    # is stable -- zigzag (appended first) sorts first.
+    assert default_result[0].candidate == zigzag_candidate
+
+    # Under "intervals" (turns weight 3/12, heavily penalizing zigzag's
+    # 2 sharp turns), the low-turn-density candidate that lost under
+    # default weights now wins.
+    assert intervals_result[0].candidate == straight_candidate
+
+
+def test_long_preset_penalizes_low_restroom_confidence_more_than_default() -> None:  # noqa: E501
+    # Two candidates, identical shape/elevation/distance (shifted apart
+    # in longitude so they never overlap for similarity purposes and
+    # each only matches its own restroom), differing only in restroom
+    # confidence (one restroom has full metadata, the other has none).
+    high_confidence_candidate = make_candidate(
+        start_lat=40.70, longitude=-74.00, distance_m=1000.0
+    )
+    low_confidence_candidate = make_candidate(
+        start_lat=40.70, longitude=-73.90, distance_m=1000.0
+    )
+
+    high_confidence_restroom = make_restroom(
+        source_id="high-confidence",
+        latitude=40.70,
+        longitude=-74.00,
+        hours_of_operation="8 AM-8 PM",
+        accessibility="Accessible",
+    )
+    low_confidence_restroom = make_restroom(
+        source_id="low-confidence",
+        latitude=40.70,
+        longitude=-73.90,
+    )
+
+    default_result = score_and_rank_candidates(
+        candidates=[
+            low_confidence_candidate,
+            high_confidence_candidate,
+        ],
+        restrooms=[
+            low_confidence_restroom,
+            high_confidence_restroom,
+        ],
+        target_distance_m=1000.0,
+        min_mile_m=0.0,
+        max_mile_m=100.0,
+        preferred_elevation_bucket="flat",
+        interruption_store=EMPTY_INTERRUPTION_STORE,
+        workout_type=None,
+    )
+    long_result = score_and_rank_candidates(
+        candidates=[
+            low_confidence_candidate,
+            high_confidence_candidate,
+        ],
+        restrooms=[
+            low_confidence_restroom,
+            high_confidence_restroom,
+        ],
+        target_distance_m=1000.0,
+        min_mile_m=0.0,
+        max_mile_m=100.0,
+        preferred_elevation_bucket="flat",
+        interruption_store=EMPTY_INTERRUPTION_STORE,
+        workout_type="long",
+    )
+
+    default_high = next(
+        scored
+        for scored in default_result
+        if scored.candidate == high_confidence_candidate
+    )
+    default_low = next(
+        scored
+        for scored in default_result
+        if scored.candidate == low_confidence_candidate
+    )
+    long_high = next(
+        scored
+        for scored in long_result
+        if scored.candidate == high_confidence_candidate
+    )
+    long_low = next(
+        scored
+        for scored in long_result
+        if scored.candidate == low_confidence_candidate
+    )
+
+    default_gap = default_low.composite_score - default_high.composite_score  # noqa: E501
+    long_gap = long_low.composite_score - long_high.composite_score
+
+    # "long"'s restroom_confidence weight (2/13 ≈ 0.154) is a larger
+    # share of the composite than default's (1/10 = 0.1), so the
+    # confidence penalty widens the gap between the two candidates.
+    assert long_gap > default_gap
+
+
+def test_hills_preset_weighs_elevation_more_heavily_than_default() -> None:
+    flat_candidate = make_candidate_with_gain(
+        elevation_gain_m=0.0, distance_m=1000.0
+    )
+    hilly_candidate = make_candidate_with_gain(
+        elevation_gain_m=40.0, distance_m=1000.0
+    )
+
+    restroom = make_restroom(
+        source_id="shared", latitude=40.70, longitude=-74.00
+    )
+
+    default_result = score_and_rank_candidates(
+        candidates=[hilly_candidate, flat_candidate],
+        restrooms=[restroom],
+        target_distance_m=1000.0,
+        min_mile_m=0.0,
+        max_mile_m=100.0,
+        preferred_elevation_bucket="flat",
+        interruption_store=EMPTY_INTERRUPTION_STORE,
+        workout_type=None,
+    )
+    hills_result = score_and_rank_candidates(
+        candidates=[hilly_candidate, flat_candidate],
+        restrooms=[restroom],
+        target_distance_m=1000.0,
+        min_mile_m=0.0,
+        max_mile_m=100.0,
+        preferred_elevation_bucket="flat",
+        interruption_store=EMPTY_INTERRUPTION_STORE,
+        workout_type="hills",
+    )
+
+    default_hilly = next(
+        scored
+        for scored in default_result
+        if scored.candidate == hilly_candidate
+    )
+    hills_hilly = next(
+        scored
+        for scored in hills_result
+        if scored.candidate == hilly_candidate
+    )
+
+    # "hills"'s elevation weight (5/11 ≈ 0.455) is a larger share of
+    # the composite than default's (3/10 = 0.3), so the mismatch
+    # penalty on the hilly candidate (bucketed "hilly" against the
+    # "flat" preference used here, mismatch=1.0) is larger in absolute
+    # terms under "hills".
+    assert hills_hilly.composite_score > default_hilly.composite_score

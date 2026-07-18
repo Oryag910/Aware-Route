@@ -45,6 +45,7 @@ export type RankedRoute = {
   longest_climb_m: number;
   longest_climb_grade_pct: number;
   max_grade_pct: number;
+  archetype: string | null;
 };
 
 export class ApiError extends Error {
@@ -76,6 +77,10 @@ export async function fetchRankedRoutes(
   // string-backed inputs in RouteForm.
   if (values.runTime !== "") {
     body.run_time = values.runTime;
+  }
+
+  if (values.workoutType !== "") {
+    body.workout_type = values.workoutType;
   }
 
   const response = await fetch("/api/routes/with-restroom", {

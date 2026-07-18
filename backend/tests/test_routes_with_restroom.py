@@ -232,11 +232,14 @@ def test_routes_with_restroom_success() -> None:
         "longest_climb_m",
         "longest_climb_grade_pct",
         "max_grade_pct",
+        "archetype",
     }
 
     assert route["distance_m"] == pytest.approx(2220.0)
     assert route["elevation_gain_m"] == pytest.approx(10.0)
     assert route["matched"] is True
+    # The single matched result is by definition the best overall.
+    assert route["archetype"] == "best_overall"
     assert route["off_route_distance_m"] == pytest.approx(0.0, abs=5.0)
     assert route["distance_error_m"] == pytest.approx(0.0)
     assert route["mile_range_error_m"] == pytest.approx(0.0)
@@ -690,3 +693,35 @@ def test_restroom_first_generation_fixes_mile_range_error_blind_candidates_miss(
     assert len(fallback_routes) > 0
     for route in fallback_routes:
         assert route["mile_range_error_m"] > 500.0
+
+
+def test_routes_with_restroom_accepts_workout_type() -> None:
+    candidate = make_candidate()
+    restroom = make_restroom()
+
+    fake_provider = FakeRoutingProvider(candidate)
+
+    app.dependency_overrides[get_routing_provider] = (
+        lambda: fake_provider
+    )
+    app.dependency_overrides[get_eligible_restrooms] = (
+        lambda: [restroom]
+    )
+
+    response = client.post(
+        "/routes/with-restroom",
+        json={
+            "start_lat": 40.70,
+            "start_lon": -74.00,
+            "target_distance_m": 2220.0,
+            "restroom_min_mile": 0.5,
+            "restroom_max_mile": 1.0,
+            "elevation_preference": "flat",
+            "count": 1,
+            "run_time": "2026-01-01T12:00:00",
+            "workout_type": "tempo",
+        },
+    )
+
+    assert response.status_code == 200
+    assert len(response.json()) == 1

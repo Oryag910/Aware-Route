@@ -1,6 +1,12 @@
 import type { RankedRoute } from "../api";
 import { routeFacts, tradeoffLine } from "../explanations";
 
+const ARCHETYPE_LABELS: Record<string, string> = {
+  best_overall: "Best overall",
+  smoothest: "Smoothest",
+  most_scenic: "Most scenic",
+};
+
 type RouteResultsProps = {
   routes: RankedRoute[];
   selectedIndex: number | null;
@@ -69,6 +75,22 @@ export default function RouteResults({
                 >
                   {route.matched ? "Matched" : "Closest available"}
                 </span>
+                {route.archetype !== null && (
+                  <span
+                    style={{
+                      display: "inline-block",
+                      padding: "2px 8px",
+                      borderRadius: "4px",
+                      fontSize: "0.75rem",
+                      fontWeight: "bold",
+                      marginLeft: "8px",
+                      backgroundColor: "#dbeafe",
+                      color: "#1e40af",
+                    }}
+                  >
+                    {ARCHETYPE_LABELS[route.archetype] ?? route.archetype}
+                  </span>
+                )}
               </h3>
 
               {!route.matched && (

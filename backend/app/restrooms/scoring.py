@@ -36,6 +36,13 @@ MAX_RESTROOM_RANGE_ERROR_M = 500.0
 # composite factors.
 SIGNALS_PER_KM_CEILING = 8.0
 
+# Worst-case-ish ceiling for (sharp_turn_count + 2*u_turn_count) per km --
+# used to normalize turn density into [0, 1] the same way
+# SIGNALS_PER_KM_CEILING normalizes interruption density. U-turns count
+# double since they're the out-and-back signature a "few turns" preset
+# (tempo/intervals) most wants to avoid.
+TURNS_PER_KM_CEILING = 6.0
+
 # Renormalized from the original 15:10:5:5 ratio now that distance_error
 # and mile_range_error are hard constraints instead of weighted factors.
 # 15:10:5:5 reduces to 3:2:1:1 (dividing by 5), and 3+2+1+1 = 7, so each
@@ -54,17 +61,133 @@ SIGNALS_PER_KM_CEILING = 8.0
 # as a quality signal (many real crossings are untagged or tagged
 # without a recognizable pattern), unlike traffic_signals which is
 # reliably tagged.
-# Shape metrics (sharp_turn_count, u_turn_count, compactness) are
+# Shape metrics (sharp_turn_count, u_turn_count, compactness) were
 # reported but deliberately not scored here -- repeated_segment_ratio
 # already penalizes the dominant shape failure (out-and-backs), and
-# shape is meant to become a preset-weighted factor in a later phase,
-# not a fixed weight in this composite.
+# shape was meant to become a preset-weighted factor in a later phase.
+# That phase (workout presets, see WeightProfile/WEIGHT_PROFILES below)
+# has now arrived: turn density and street-vs-path share join the
+# composite as preset-driven factors, at a weight of 0 in the None
+# (default) profile -- these six WEIGHT_* constants are that default
+# profile's exact weights, kept standalone (rather than folded away)
+# because the existing hand-computed default-weight tests import and
+# assert against them directly.
 WEIGHT_ELEVATION_MISMATCH = 3 / 10
 WEIGHT_REPEATED_SEGMENT = 2 / 10
 WEIGHT_INTERRUPTION = 2 / 10
 WEIGHT_SIMILARITY_PENALTY = 1 / 10
 WEIGHT_RESTROOM_CONFIDENCE = 1 / 10
 WEIGHT_OFF_ROUTE = 1 / 10
+
+
+@dataclass(frozen=True)
+class WeightProfile:
+    elevation: float
+    repeated_segment: float
+    interruption: float
+    similarity: float
+    restroom_confidence: float
+    off_route: float
+    turns: float
+    street: float
+
+
+# Each profile below is written as an integer-part ratio (elevation,
+# repeated_segment, interruption, similarity, restroom_confidence,
+# off_route, turns, street), then normalized by dividing every part by
+# the row's sum -- the same "restate every weight as an exact share of
+# the denominator" approach the pre-Phase-F comment above used for the
+# six-factor composite.
+#
+#   profile     elev repeat interrupt sim conf off-route turns street sum
+#   None(default)  3    2       2       1   1      1        0     0    10
+#   easy            2    2       3       1   1      1        1     2    13
+#   tempo           3    1       4       1   1      1        2     0    13
+#   long             2    3       2       1   2      1        0     2    13
+#   hills           5    1       1       1   1      1        0     1    11
+#   intervals       2    0       4       1   1      1        3     0    12
+#
+# None is the pre-Phase-F default and MUST keep the exact 3:2:2:1:1:1
+# ratio over 10 -- every existing hand-computed default-weight test
+# depends on reproducing that composite unchanged.
+WEIGHT_PROFILES: dict[str | None, WeightProfile] = {
+    None: WeightProfile(
+        elevation=3 / 10,
+        repeated_segment=2 / 10,
+        interruption=2 / 10,
+        similarity=1 / 10,
+        restroom_confidence=1 / 10,
+        off_route=1 / 10,
+        turns=0 / 10,
+        street=0 / 10,
+    ),
+    "easy": WeightProfile(
+        elevation=2 / 13,
+        repeated_segment=2 / 13,
+        interruption=3 / 13,
+        similarity=1 / 13,
+        restroom_confidence=1 / 13,
+        off_route=1 / 13,
+        turns=1 / 13,
+        street=2 / 13,
+    ),
+    "tempo": WeightProfile(
+        elevation=3 / 13,
+        repeated_segment=1 / 13,
+        interruption=4 / 13,
+        similarity=1 / 13,
+        restroom_confidence=1 / 13,
+        off_route=1 / 13,
+        turns=2 / 13,
+        street=0 / 13,
+    ),
+    "long": WeightProfile(
+        elevation=2 / 13,
+        repeated_segment=3 / 13,
+        interruption=2 / 13,
+        similarity=1 / 13,
+        restroom_confidence=2 / 13,
+        off_route=1 / 13,
+        turns=0 / 13,
+        street=2 / 13,
+    ),
+    "hills": WeightProfile(
+        elevation=5 / 11,
+        repeated_segment=1 / 11,
+        interruption=1 / 11,
+        similarity=1 / 11,
+        restroom_confidence=1 / 11,
+        off_route=1 / 11,
+        turns=0 / 11,
+        street=1 / 11,
+    ),
+    "intervals": WeightProfile(
+        elevation=2 / 12,
+        repeated_segment=0 / 12,
+        interruption=4 / 12,
+        similarity=1 / 12,
+        restroom_confidence=1 / 12,
+        off_route=1 / 12,
+        turns=3 / 12,
+        street=0 / 12,
+    ),
+}
+
+
+def turn_density_norm(
+    sharp_turn_count: int,
+    u_turn_count: int,
+    route_km: float,
+) -> float:
+    if route_km <= 0.0:
+        return 0.0
+
+    turns_per_km = (
+        sharp_turn_count + 2 * u_turn_count
+    ) / route_km
+
+    return min(turns_per_km / TURNS_PER_KM_CEILING, 1.0)
+
 
 # Fallback candidates (those failing a hard constraint) are ranked by
 # combined normalized distance+range error, weighted equally — a
@@ -282,6 +405,7 @@ def _rank_matched(
     matched: list[_PartialScore],
     distance_error_norms: list[float],
     mile_range_error_norms: list[float],
+    weights: WeightProfile,
 ) -> list[ScoredCandidate]:
     if not matched:
         return []
@@ -289,20 +413,27 @@ def _rank_matched(
     # Subtotal excludes similarity, since similarity depends on the
     # ranking order this subtotal is used to establish (see below).
     subtotals = [
-        WEIGHT_ELEVATION_MISMATCH * partial.elevation_mismatch
-        + WEIGHT_REPEATED_SEGMENT * partial.repeated_segment_ratio
-        + WEIGHT_INTERRUPTION
+        weights.elevation * partial.elevation_mismatch
+        + weights.repeated_segment * partial.repeated_segment_ratio
+        + weights.interruption
         * interruption_norm(partial.signals_per_km)
-        + WEIGHT_RESTROOM_CONFIDENCE
+        + weights.restroom_confidence
         * (1.0 - partial.restroom_confidence)
-        + WEIGHT_OFF_ROUTE
+        + weights.off_route
         * off_route_norm(partial.off_route_distance_m)
+        + weights.turns
+        * turn_density_norm(
+            partial.sharp_turn_count,
+            partial.u_turn_count,
+            partial.candidate.distance_m / 1000.0,
+        )
+        + weights.street * (1.0 - partial.pedestrian_path_ratio)
         for partial in matched
     ]
 
-    # Similarity is computed against this provisional (4-factor) order
+    # Similarity is computed against this provisional (7-factor) order
     # rather than searching all orderings — similarity's own weight
-    # (1/8) is small enough that this approximation is reasonable.
+    # is small enough that this approximation is reasonable.
     provisional_order = sorted(
         range(len(matched)),
         key=lambda index: subtotals[index],
@@ -337,7 +468,7 @@ def _rank_matched(
             similarity_penalty=similarity_penalties[index],
             composite_score=(
                 subtotals[index]
-                + WEIGHT_SIMILARITY_PENALTY
+                + weights.similarity
                 * similarity_penalties[index]
             ),
             signal_count=partial.signal_count,
@@ -427,7 +558,13 @@ def score_and_rank_candidates(
     max_mile_m: float,
     preferred_elevation_bucket: str,
     interruption_store: InterruptionStore,
+    workout_type: str | None = None,
 ) -> list[ScoredCandidate]:
+    if workout_type not in WEIGHT_PROFILES:
+        raise ValueError(f"Unknown workout_type: {workout_type!r}")
+
+    weights = WEIGHT_PROFILES[workout_type]
+
     partial_scores: list[_PartialScore] = []
 
     for candidate in candidates:
@@ -546,6 +683,7 @@ def score_and_rank_candidates(
         [partial_scores[index] for index in matched_indices],
         [distance_error_norms[index] for index in matched_indices],
         [mile_range_error_norms[index] for index in matched_indices],
+        weights,
     )
     fallback_scored = _rank_fallback(
         [partial_scores[index] for index in fallback_indices],
