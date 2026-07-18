@@ -86,6 +86,7 @@ export async function fetchRankedRoutes(
     restroom_min_mile: values.restroomMinMile,
     restroom_max_mile: values.restroomMaxMile,
     elevation_preference: values.elevationPreference,
+    shape: values.shape,
   };
 
   // JSON.stringify drops keys whose value is undefined, so run_time
