@@ -223,7 +223,12 @@ class OpenRouteServiceProvider:
                     "length": target_distance_m,
                     "points": 3,
                     "seed": seed,
-                }
+                },
+                # Without this, foot-walking freely routes over
+                # route=ferry edges, producing "runs" that cross the
+                # Hudson/East River on ferry lines -- impossible on foot
+                # and the top reported bug. Costs no extra ORS call.
+                "avoid_features": ["ferries"],
             },
         }
 
@@ -240,6 +245,10 @@ class OpenRouteServiceProvider:
             ],
             "elevation": True,
             "extra_info": ["surface", "waytype", "steepness"],
+            # Same ferry avoidance as get_loop: repaired and
+            # restroom-first routes go through this path too, so they
+            # must be held to the same no-ferry-crossing constraint.
+            "options": {"avoid_features": ["ferries"]},
         }
 
         response = self._send_request(body)

@@ -42,11 +42,13 @@ def test_get_loop_parses_success_response(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     fixture = load_fixture("round_trip_success.json")
+    captured_body: dict[str, object] = {}
 
     def fake_post(
         *_args: object,
-        **_kwargs: object,
+        **kwargs: object,
     ) -> httpx.Response:
+        captured_body.update(cast(dict[str, object], kwargs["json"]))
         return make_response(200, fixture)
 
     monkeypatch.setenv("ORS_API_KEY", "test-key")
@@ -59,6 +61,12 @@ def test_get_loop_parses_success_response(
         target_distance_m=5000.0,
         seed=1,
     )
+
+    # The round trip must be generated with ferry avoidance, or ORS
+    # will happily send the loop across the river on a ferry line.
+    options = cast(dict[str, object], captured_body["options"])
+    assert "round_trip" in options
+    assert options["avoid_features"] == ["ferries"]
 
     features = cast(list[dict[str, object]], fixture["features"])
     feature = features[0]
@@ -174,9 +182,13 @@ def test_get_route_through_waypoints_parses_success_response(
         cast(int | float, summary["distance"])
     )
 
-    # No round_trip options block -- this is a plain multi-waypoint
-    # directions request, unlike get_loop's randomized round trip.
-    assert "options" not in captured_body
+    # No round_trip block -- this is a plain multi-waypoint directions
+    # request, unlike get_loop's randomized round trip -- but it must
+    # still carry ferry avoidance so repaired/restroom-first routes
+    # can't cross the river on ferry lines.
+    options = cast(dict[str, object], captured_body["options"])
+    assert "round_trip" not in options
+    assert options["avoid_features"] == ["ferries"]
     assert captured_body["coordinates"] == [
         [-74.0060, 40.7128],
         [-74.0000, 40.7200],
