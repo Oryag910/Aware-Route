@@ -23,6 +23,7 @@ function App() {
   >(null);
   const [error, setError] = useState<string | null>(null);
   const [noRouteFound, setNoRouteFound] = useState(false);
+  const [rateLimited, setRateLimited] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
 
   async function handleRouteSubmit(values: RouteFormValues) {
@@ -33,6 +34,7 @@ function App() {
 
     setError(null);
     setNoRouteFound(false);
+    setRateLimited(false);
     setResults(null);
     setSelectedRouteIndex(null);
     setIsLoading(true);
@@ -47,6 +49,8 @@ function App() {
     } catch (caughtError) {
       if (caughtError instanceof ApiError && caughtError.status === 422) {
         setNoRouteFound(true);
+      } else if (caughtError instanceof ApiError && caughtError.status === 429) {
+        setRateLimited(true);
       } else if (caughtError instanceof Error) {
         setError(caughtError.message);
       } else {
@@ -107,6 +111,13 @@ function App() {
               No route found with a restroom in that mile range near this
               start point — try widening the range or picking a different
               start.
+            </p>
+          )}
+
+          {rateLimited && (
+            <p className="rounded-md border border-amber-200 bg-amber-50 p-3 text-sm text-amber-800">
+              Demo limit reached — this demo allows a few requests per hour.
+              Try again later.
             </p>
           )}
 

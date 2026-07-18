@@ -103,3 +103,63 @@ Frontend:
 http://localhost:5173
 ```
 
+## Deployment
+
+### Render (Backend)
+
+Deploy the FastAPI backend to [Render](https://render.com):
+
+1. **From the repo blueprint**: Push this repo to GitHub. In Render, select "New" > "Blueprint" and point to your repository. Render will auto-detect the `render.yaml` at the repo root and deploy the backend service with the correct Docker build settings.
+
+2. **Alternatively, manual setup**: Create a new Web Service on Render, connect your repository, and configure:
+   - **Docker**: Build command uses `./backend/Dockerfile` with build context `./backend`
+   - **Port**: Render injects the `PORT` env var; the Dockerfile binds uvicorn to it automatically
+   - **Health check**: `/health` endpoint
+
+Either way, set these environment variables in Render:
+
+- `ORS_API_KEY`: Your OpenRouteService API key (required; get a free tier key at [openrouteservice.org](https://openrouteservice.org))
+- `SUPABASE_URL`: Supabase project URL (required for restroom data)
+- `SUPABASE_KEY`: Supabase anonymous key (required)
+- `ALLOWED_ORIGINS`: Comma-separated list of frontend origins (e.g., `https://your-frontend.vercel.app`). If unset, no CORS headers are sent.
+
+**Note**: Render's free tier spins down inactive services after 15 minutes. The first request after idle will be slow (cold start).
+
+### Vercel (Frontend)
+
+Deploy the React/Vite frontend to [Vercel](https://vercel.com):
+
+1. Import your repository into Vercel
+2. Configure the build:
+   - **Root Directory**: `frontend`
+   - **Build Command**: `npm run build` (default is fine)
+   - **Output Directory**: `dist` (default)
+3. Set the environment variable:
+   - `VITE_API_URL`: The Render backend URL, e.g., `https://your-app.onrender.com` (no trailing slash; the `/api` prefix is not used in production)
+4. Deploy and redeploy after setting `VITE_API_URL` (Vercel needs to rebuild with the variable set)
+
+The `vercel.json` in `frontend/` configures SPA routing: all requests are rewritten to `index.html`.
+
+### CORS Configuration
+
+Cross-origin requests (from the frontend to the backend) are only allowed when `ALLOWED_ORIGINS` is set on the Render service. Set it to your Vercel frontend URL:
+
+```
+https://your-frontend.vercel.app
+```
+
+During local development, the Vite dev server proxies `/api/*` requests to `http://localhost:8000` (stripping the `/api` prefix), so CORS is not needed.
+
+### Demo Rate Limits
+
+The backend enforces two demo-tier rate limits:
+
+- **Per-IP**: 10 requests/hour (sliding window)
+- **Global**: 90 requests/day (sliding window)
+
+**Why these limits**: Each route request costs up to 20 OpenRouteService API calls. The ORS free tier allows 2000 calls/day, so 90 requests/day uses at most 1800 calls, leaving headroom. The per-IP limit prevents single clients from exhausting the daily quota.
+
+The rate limiter is in-memory and single-instance; it resets when the Render service restarts. At scale, you would replace it with a persistent store (e.g., Redis).
+
+Clients hitting the rate limit receive a 429 response with the message: "Demo request limit reached — try again later."
+

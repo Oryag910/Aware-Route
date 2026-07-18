@@ -58,6 +58,23 @@ export class ApiError extends Error {
   }
 }
 
+// API base URL scheme:
+// - Dev: VITE_API_URL is unset, so API_BASE is "". Requests go to relative
+//   "/api/..." paths, which Vite's dev proxy (vite.config.ts) forwards to
+//   the local backend after stripping the "/api" prefix.
+// - Prod: VITE_API_URL is set to the Render backend's origin (which has no
+//   "/api" prefix on its routes). apiUrl() only prepends "/api" when
+//   API_BASE is empty, so prod requests hit "${API_BASE}/routes/..." while
+//   dev requests hit "/api/routes/...".
+const API_BASE = (import.meta.env.VITE_API_URL as string | undefined ?? "").replace(
+  /\/+$/,
+  "",
+);
+
+function apiUrl(path: string): string {
+  return API_BASE === "" ? `/api${path}` : `${API_BASE}${path}`;
+}
+
 export async function fetchRankedRoutes(
   startPosition: [number, number],
   values: RouteFormValues,
@@ -83,7 +100,7 @@ export async function fetchRankedRoutes(
     body.workout_type = values.workoutType;
   }
 
-  const response = await fetch("/api/routes/with-restroom", {
+  const response = await fetch(apiUrl("/routes/with-restroom"), {
     method: "POST",
     headers: {
       "Content-Type": "application/json",

@@ -1,13 +1,16 @@
+import os
 from datetime import datetime
 from typing import Annotated, Literal
 
 from fastapi import Depends, FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
 from app.flow.interruptions import (
     InterruptionStore,
     get_interruption_store as _get_interruption_store,
 )
+from app.rate_limit import rate_limit_dependency
 from app.restrooms.archetypes import assign_archetypes
 from app.restrooms.hours import confidently_closed
 from app.restrooms.models import Restroom
@@ -39,6 +42,22 @@ from app.routing.provider import (
 
 
 app = FastAPI(title="Aware Running Route API")
+
+# Dev relies on the Vite proxy, so no CORS is needed there -- only add
+# the middleware when ALLOWED_ORIGINS is explicitly set (e.g. in
+# production, pointing at the deployed frontend origin).
+_allowed_origins = [
+    origin.strip()
+    for origin in os.environ.get("ALLOWED_ORIGINS", "").split(",")
+    if origin.strip()
+]
+if _allowed_origins:
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=_allowed_origins,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
 
 routing_provider = OpenRouteServiceProvider()
 
@@ -144,7 +163,7 @@ def health_check() -> dict[str, str]:
     return {"status": "ok"}
 
 
-@app.post("/routes")
+@app.post("/routes", dependencies=[Depends(rate_limit_dependency)])
 def get_routes(
     request: RouteRequest,
     provider: Annotated[
@@ -176,7 +195,10 @@ def get_routes(
         ) from exc
 
 
-@app.post("/routes/with-restroom")
+@app.post(
+    "/routes/with-restroom",
+    dependencies=[Depends(rate_limit_dependency)],
+)
 def get_routes_with_restroom(
     request: RestroomRouteRequest,
     provider: Annotated[
