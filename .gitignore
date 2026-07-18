@@ -45,8 +45,13 @@ exports/
 # OSMnx Overpass response cache
 backend/cache/
 
-# Large regenerable routing graph (rebuild via scripts/build_graph.py)
+# Large regenerable routing graph (rebuild via scripts/build_graph.py).
+# The versioned artifact (v1.pkl + its manifest) IS committed -- it's the
+# packaged graph the app loads at runtime, see docs/graph-packaging.md.
+# The legacy unversioned .gpickle/.graphml stay ignored.
 backend/data/manhattan_walk_graph.*
+!backend/data/manhattan_walk_graph.v1.pkl
+!backend/data/manhattan_walk_graph.v1.manifest.json
 
 # Editor files
 .vscode/
