@@ -3,7 +3,7 @@ from typing import Any, Literal
 import networkx as nx
 
 from app.amenities.snapping import SnappedAmenity, amenities_in_range
-from app.generation.length_tune import tune_to_target
+from app.generation.length_tune import tune_pair_to_target
 from app.generation.turnarounds import select_turnarounds
 from app.graph.distances import (
     nearest_node,
@@ -55,13 +55,13 @@ def _return_path(
     return path
 
 
-def _out_and_back_through(
+def _out_and_back_through_pair(
     graph: Any,
     start_node: int,
     dists: dict[int, float],
     amenity_node: int,
     target_distance_m: float,
-) -> RouteCandidate | None:
+) -> tuple[RouteCandidate, list[int]] | None:
     """Out-and-back through `amenity_node`: walk out to it and retrace
     home, then spur the residual to hit target length. The amenity sits
     at arc-distance = its (sub-target/2) range, so the doubled path
@@ -75,23 +75,18 @@ def _out_and_back_through(
     out_and_back = path + list(reversed(path))[1:]
     candidate = path_to_candidate(graph, out_and_back)
 
-    return tune_to_target(
-        graph,
-        start_node,
-        candidate,
-        out_and_back,
-        target_distance_m,
-        dists=dists,
+    return tune_pair_to_target(
+        graph, start_node, candidate, out_and_back, target_distance_m, dists=dists
     )
 
 
-def _round_through(
+def _round_through_pair(
     graph: Any,
     start_node: int,
     dists: dict[int, float],
     amenity_node: int,
     target_distance_m: float,
-) -> RouteCandidate | None:
+) -> tuple[RouteCandidate, list[int]] | None:
     """Round route through `amenity_node`: walk out to it, continue to a
     turnaround at the remaining half-target radius, then return via a
     reuse-penalised path preferring streets not already walked."""
@@ -140,9 +135,73 @@ def _round_through(
     loop = outbound_full + return_path[1:]
     candidate = path_to_candidate(graph, loop)
 
-    return tune_to_target(
+    return tune_pair_to_target(
         graph, start_node, candidate, loop, target_distance_m, dists=dists
     )
+
+
+def through_amenities_pairs(
+    graph: Any,
+    start: Coordinate,
+    target_distance_m: float,
+    snapped: list[SnappedAmenity],
+    min_range_m: float,
+    max_range_m: float,
+    shape: Shape,
+    count: int,
+) -> list[tuple[RouteCandidate, list[int], Shape]]:
+    """(candidate, node_path, shape) triples for amenity-passing routes.
+
+    Same selection/ranking logic as `generate_through_amenities`, but
+    also returns each candidate's node_path and the concrete shape
+    ("round"/"out_and_back") that produced it, needed by
+    `app.generation.engine.generate_routes` to compute node-path-based
+    QualityMetrics. "mix" picks whichever of the two sub-shapes best
+    hits the target, same as the candidate-only path.
+    """
+    start_node = nearest_node(graph, start)
+    dists = single_source_distances(graph, start_node)
+
+    in_range = amenities_in_range(snapped, dists, min_range_m, max_range_m)
+    pool = in_range[: count * CANDIDATE_MULTIPLIER]
+
+    triples: list[tuple[RouteCandidate, list[int], Shape]] = []
+
+    for entry in pool:
+        amenity_node = entry.node_id
+        produced: list[tuple[RouteCandidate, list[int], Shape]] = []
+
+        if shape in ("out_and_back", "mix"):
+            oab = _out_and_back_through_pair(
+                graph, start_node, dists, amenity_node, target_distance_m
+            )
+            if oab is not None:
+                produced.append((oab[0], oab[1], "out_and_back"))
+
+        if shape in ("round", "mix"):
+            loop = _round_through_pair(
+                graph, start_node, dists, amenity_node, target_distance_m
+            )
+            if loop is not None:
+                produced.append((loop[0], loop[1], "round"))
+
+        if not produced:
+            continue
+
+        if shape == "mix":
+            best = min(
+                produced,
+                key=lambda t: abs(t[0].distance_m - target_distance_m),
+            )
+            triples.append(best)
+        else:
+            triples.extend(produced)
+
+    triples.sort(
+        key=lambda triple: abs(triple[0].distance_m - target_distance_m)
+    )
+
+    return _dedup_triples(triples)[:count]
 
 
 def generate_through_amenities(
@@ -163,60 +222,23 @@ def generate_through_amenities(
     or the pool is exhausted. Candidates are ordered by distance error
     to `target_distance_m`.
     """
-    start_node = nearest_node(graph, start)
-    dists = single_source_distances(graph, start_node)
-
-    in_range = amenities_in_range(snapped, dists, min_range_m, max_range_m)
-    pool = in_range[: count * CANDIDATE_MULTIPLIER]
-
-    candidates: list[RouteCandidate] = []
-
-    for entry in pool:
-        amenity_node = entry.node_id
-        produced: list[RouteCandidate] = []
-
-        if shape in ("out_and_back", "mix"):
-            oab = _out_and_back_through(
-                graph, start_node, dists, amenity_node, target_distance_m
-            )
-            if oab is not None:
-                produced.append(oab)
-
-        if shape in ("round", "mix"):
-            loop = _round_through(
-                graph, start_node, dists, amenity_node, target_distance_m
-            )
-            if loop is not None:
-                produced.append(loop)
-
-        if not produced:
-            continue
-
-        if shape == "mix":
-            best = min(
-                produced,
-                key=lambda c: abs(c.distance_m - target_distance_m),
-            )
-            candidates.append(best)
-        else:
-            candidates.extend(produced)
-
-    candidates.sort(
-        key=lambda candidate: abs(candidate.distance_m - target_distance_m)
+    triples = through_amenities_pairs(
+        graph, start, target_distance_m, snapped, min_range_m, max_range_m, shape, count
     )
+    return [candidate for candidate, _node_path, _shape in triples]
 
-    return _dedup(candidates)[:count]
 
-
-def _dedup(candidates: list[RouteCandidate]) -> list[RouteCandidate]:
+def _dedup_triples(
+    triples: list[tuple[RouteCandidate, list[int], Shape]],
+) -> list[tuple[RouteCandidate, list[int], Shape]]:
     seen: set[tuple[tuple[float, float], ...]] = set()
-    unique: list[RouteCandidate] = []
+    unique: list[tuple[RouteCandidate, list[int], Shape]] = []
 
-    for candidate in candidates:
+    for candidate, node_path, shape in triples:
         key = tuple((point.lat, point.lon) for point in candidate.geometry)
         if key in seen:
             continue
         seen.add(key)
-        unique.append(candidate)
+        unique.append((candidate, node_path, shape))
 
     return unique

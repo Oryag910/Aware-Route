@@ -59,6 +59,46 @@ def _spur_path(
     return None
 
 
+def tune_pair_to_target(
+    graph: Any,
+    start_node: int,
+    candidate: RouteCandidate,
+    node_path: list[int],
+    target_distance_m: float,
+    tolerance_m: float = DEFAULT_TOLERANCE_M,
+    dists: dict[int, float] | None = None,
+) -> tuple[RouteCandidate, list[int]]:
+    """Nudge a candidate's length toward the target with a spur, also
+    returning the (possibly spur-spliced) node_path in sync with the
+    tuned candidate. `tune_to_target` is a thin wrapper around this that
+    drops the node_path for callers that only need the candidate.
+
+    Within tolerance: returned unchanged. Too short: an out-and-back
+    spur from the start is spliced in front of the route to absorb the
+    deficit. (Overshoot is handled upstream by regenerating at a smaller
+    radius via `tune_generator_to_target`.)
+    """
+    error = candidate.distance_m - target_distance_m
+    if abs(error) <= tolerance_m:
+        return candidate, node_path
+
+    if error > 0:
+        # Too long: nothing a spur can fix (it only adds length).
+        return candidate, node_path
+
+    deficit_m = -error
+    if dists is None:
+        dists = single_source_distances(graph, start_node)
+
+    spur = _spur_path(graph, start_node, dists, deficit_m)
+    if spur is None:
+        return candidate, node_path
+
+    # Spur out-and-back from the start, then the original route.
+    tuned_path = spur + node_path[1:]
+    return path_to_candidate(graph, tuned_path), tuned_path
+
+
 def tune_to_target(
     graph: Any,
     start_node: int,
@@ -75,42 +115,30 @@ def tune_to_target(
     deficit. (Overshoot is handled upstream by regenerating at a smaller
     radius via `tune_generator_to_target`.)
     """
-    error = candidate.distance_m - target_distance_m
-    if abs(error) <= tolerance_m:
-        return candidate
-
-    if error > 0:
-        # Too long: nothing a spur can fix (it only adds length).
-        return candidate
-
-    deficit_m = -error
-    if dists is None:
-        dists = single_source_distances(graph, start_node)
-
-    spur = _spur_path(graph, start_node, dists, deficit_m)
-    if spur is None:
-        return candidate
-
-    # Spur out-and-back from the start, then the original route.
-    tuned_path = spur + node_path[1:]
-    return path_to_candidate(graph, tuned_path)
+    tuned, _node_path = tune_pair_to_target(
+        graph, start_node, candidate, node_path, target_distance_m, tolerance_m, dists
+    )
+    return tuned
 
 
-def tune_generator_to_target(
+def tune_generator_pairs_to_target(
     graph: Any,
     start_node: int,
     dists: dict[int, float],
     generate: Callable[[float], list[tuple[RouteCandidate, list[int]]]],
     target_distance_m: float,
     tolerance_m: float = DEFAULT_TOLERANCE_M,
-) -> list[RouteCandidate]:
-    """Drive a radius-scaled generator to the target length.
+) -> list[tuple[RouteCandidate, list[int]]]:
+    """Drive a radius-scaled generator to the target length, keeping
+    each tuned candidate's node_path alongside it. `tune_generator_to_target`
+    is a thin wrapper around this that drops the node_paths for callers
+    that only need candidates.
 
     `generate(radius_scale)` returns (candidate, node_path) pairs. When
     the best candidate at full radius overshoots target+tolerance, a
     binary search on radius_scale (MIN..MAX) brackets down until it fits;
     the residual undershoot is then spurred up per candidate. Returns
-    the tuned candidates.
+    the tuned (candidate, node_path) pairs.
     """
 
     def best_distance(pairs: list[tuple[RouteCandidate, list[int]]]) -> float:
@@ -143,7 +171,7 @@ def tune_generator_to_target(
 
     _ = chosen_scale  # documents which radius produced the kept pool
     return [
-        tune_to_target(
+        tune_pair_to_target(
             graph,
             start_node,
             candidate,
@@ -154,3 +182,25 @@ def tune_generator_to_target(
         )
         for candidate, node_path in pairs
     ]
+
+
+def tune_generator_to_target(
+    graph: Any,
+    start_node: int,
+    dists: dict[int, float],
+    generate: Callable[[float], list[tuple[RouteCandidate, list[int]]]],
+    target_distance_m: float,
+    tolerance_m: float = DEFAULT_TOLERANCE_M,
+) -> list[RouteCandidate]:
+    """Drive a radius-scaled generator to the target length.
+
+    `generate(radius_scale)` returns (candidate, node_path) pairs. When
+    the best candidate at full radius overshoots target+tolerance, a
+    binary search on radius_scale (MIN..MAX) brackets down until it fits;
+    the residual undershoot is then spurred up per candidate. Returns
+    the tuned candidates.
+    """
+    pairs = tune_generator_pairs_to_target(
+        graph, start_node, dists, generate, target_distance_m, tolerance_m
+    )
+    return [candidate for candidate, _node_path in pairs]
