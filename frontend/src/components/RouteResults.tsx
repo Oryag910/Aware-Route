@@ -1,5 +1,6 @@
 import type { RankedRoute } from "../api";
 import { routeFacts, tradeoffLine } from "../explanations";
+import { AlertCircle, CheckCircle, Star } from "../icons";
 
 const ARCHETYPE_LABELS: Record<string, string> = {
   best_overall: "Best overall",
@@ -22,12 +23,12 @@ export default function RouteResults({
 
   return (
     <section>
-      <h2 className="text-lg font-semibold text-slate-900">
-        Route Options
+      <h2 className="font-display text-lg font-semibold text-ink">
+        Your routes
       </h2>
 
       {routes.length < 3 && (
-        <p className="mt-1 text-sm text-slate-500">
+        <p className="mt-1 text-sm text-ink-muted">
           Found {routes.length} of up to 3 routes.
         </p>
       )}
@@ -47,45 +48,52 @@ export default function RouteResults({
               type="button"
               onClick={() => onSelect(index)}
               aria-pressed={isSelected}
-              className={`block w-full cursor-pointer rounded-lg border p-4 text-left transition-colors hover:border-blue-400 ${
+              className={`block w-full cursor-pointer rounded-xl border p-4 text-left transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/40 ${
                 isSelected
-                  ? "border-blue-600 bg-blue-50 ring-2 ring-blue-600"
-                  : "border-slate-300 bg-white"
+                  ? "border-primary bg-primary/5 ring-2 ring-primary shadow-sm"
+                  : "border-border bg-surface hover:border-primary/50 hover:shadow-sm"
               }`}
             >
-              <h3 className="font-semibold text-slate-900">
-                Route {index + 1}{" "}
-                <span
-                  className={`ml-2 inline-block rounded px-2 py-0.5 text-xs font-bold ${
-                    route.matched
-                      ? "bg-green-100 text-green-800"
-                      : "bg-amber-100 text-amber-800"
-                  }`}
-                >
-                  {route.matched ? "Matched" : "Closest available"}
-                </span>
+              <div className="flex flex-wrap items-center gap-2">
+                <h3 className="font-display font-semibold text-ink">
+                  Route {index + 1}
+                </h3>
+
+                {route.matched ? (
+                  <span className="inline-flex items-center gap-1 rounded-full bg-success/15 px-2.5 py-0.5 text-xs font-semibold text-success">
+                    <CheckCircle className="h-3.5 w-3.5" />
+                    Matched
+                  </span>
+                ) : (
+                  <span className="inline-flex items-center gap-1 rounded-full bg-warning/15 px-2.5 py-0.5 text-xs font-semibold text-warning">
+                    <AlertCircle className="h-3.5 w-3.5" />
+                    Closest available
+                  </span>
+                )}
+
                 {route.archetype !== null && (
-                  <span className="ml-2 inline-block rounded bg-blue-100 px-2 py-0.5 text-xs font-bold text-blue-800">
+                  <span className="inline-flex items-center gap-1 rounded-full border border-primary/30 bg-primary/10 px-2.5 py-0.5 text-xs font-semibold text-primary">
+                    <Star className="h-3.5 w-3.5" />
                     {ARCHETYPE_LABELS[route.archetype] ?? route.archetype}
                   </span>
                 )}
-              </h3>
+              </div>
 
               {!route.matched && (
-                <p className="mt-1 text-sm text-amber-700">
-                  Doesn't quite hit your requested distance or restroom
-                  range — closest option found.
+                <p className="mt-1.5 text-sm text-warning">
+                  Doesn't quite hit your requested distance or restroom range —
+                  closest option found.
                 </p>
               )}
 
-              <ul className="my-2 list-disc space-y-0.5 pl-5 text-sm text-slate-600">
+              <ul className="my-2 list-disc space-y-0.5 pl-5 text-sm text-ink-muted">
                 {facts.map((fact) => (
                   <li key={fact}>{fact}</li>
                 ))}
               </ul>
 
               {tradeoff !== null && (
-                <p className="text-sm italic text-slate-500">{tradeoff}</p>
+                <p className="text-sm italic text-ink-muted">{tradeoff}</p>
               )}
             </button>
           );

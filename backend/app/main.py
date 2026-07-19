@@ -132,6 +132,11 @@ class RestroomInfo(BaseModel):
     latitude: float
     longitude: float
     mile_marker_m: float
+    # Which amenity kind this is, so the frontend can pick a distinct
+    # marker. The ORS pipeline only matches Supabase restrooms, so it
+    # always sends "restroom"; the local pipeline threads the real kind
+    # (restrooms + water fountains). Defaults to "restroom" for back-compat.
+    kind: Literal["restroom", "fountain"] = "restroom"
 
 
 class RankedRouteResponse(BaseModel):
@@ -257,6 +262,7 @@ def _local_response(
             latitude=amenity.lat,
             longitude=amenity.lon,
             mile_marker_m=scored.best_amenity.mile_marker_m,
+            kind=amenity.kind,
         ),
         matched=scored.matched,
         off_route_distance_m=scored.off_route_distance_m,
