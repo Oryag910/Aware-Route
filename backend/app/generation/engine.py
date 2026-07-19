@@ -6,7 +6,7 @@ from app.generation.length_tune import tune_generator_pairs_to_target
 from app.generation.out_and_back import out_and_back_pairs
 from app.generation.round_route import round_pairs
 from app.generation.routes import GeneratedRoute, compute_quality
-from app.graph.distances import nearest_node, single_source_distances
+from app.graph.distances import nearest_node, single_source_paths
 from app.routing.provider import Coordinate, RouteCandidate
 
 
@@ -20,21 +20,26 @@ def _tuned_pairs(
     shape: Literal["round", "out_and_back"],
     target_distance_m: float,
     count: int,
+    paths: dict[int, list[int]] | None = None,
 ) -> list[tuple[RouteCandidate, list[int]]]:
     """Generate a shape's (candidate, node_path) pairs and drive them to
-    target length."""
+    target length. `paths` (single-source shortest paths from start) is
+    reused across every tuning iteration to avoid re-running outbound
+    Dijkstras."""
 
     def generate(radius_scale: float) -> list[tuple[RouteCandidate, list[int]]]:
         if shape == "round":
             return round_pairs(
-                graph, start_node, dists, target_distance_m, count, radius_scale
+                graph, start_node, dists, target_distance_m, count, radius_scale,
+                paths,
             )
         return out_and_back_pairs(
-            graph, start_node, dists, target_distance_m, count, radius_scale
+            graph, start_node, dists, target_distance_m, count, radius_scale,
+            paths,
         )
 
     return tune_generator_pairs_to_target(
-        graph, start_node, dists, generate, target_distance_m
+        graph, start_node, dists, generate, target_distance_m, paths=paths
     )
 
 
@@ -77,7 +82,10 @@ def generate_routes(
     turnaround-bearing diversity already applied in `out_and_back_pairs`.
     """
     start_node = nearest_node(graph, start)
-    dists = single_source_distances(graph, start_node)
+    # One Dijkstra from the start yields both distances and every outbound
+    # path; reused across shapes, tuning iterations, and the amenity pool
+    # so outbound legs never re-run a Dijkstra.
+    dists, paths = single_source_paths(graph, start_node)
 
     amenity_aware = (
         snapped is not None and min_range_m is not None and max_range_m is not None
@@ -86,7 +94,9 @@ def generate_routes(
     if shape in ("round", "out_and_back"):
         pool = _to_routes(
             graph,
-            _tuned_pairs(graph, start_node, dists, shape, target_distance_m, count),
+            _tuned_pairs(
+                graph, start_node, dists, shape, target_distance_m, count, paths
+            ),
             shape,
         )
     else:
@@ -95,14 +105,15 @@ def generate_routes(
         round_pool = _to_routes(
             graph,
             _tuned_pairs(
-                graph, start_node, dists, "round", target_distance_m, count
+                graph, start_node, dists, "round", target_distance_m, count, paths
             ),
             "round",
         )
         out_back_pool = _to_routes(
             graph,
             _tuned_pairs(
-                graph, start_node, dists, "out_and_back", target_distance_m, count
+                graph, start_node, dists, "out_and_back", target_distance_m,
+                count, paths,
             ),
             "out_and_back",
         )
@@ -126,6 +137,8 @@ def generate_routes(
         max_range_m,
         shape,
         count,
+        dists,
+        paths,
     )
     amenity_pool = [
         GeneratedRoute(

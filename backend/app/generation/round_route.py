@@ -6,7 +6,7 @@ from app.generation.shape_metrics import isoperimetric_quotient
 from app.generation.turnarounds import select_turnarounds
 from app.graph.distances import (
     nearest_node,
-    shortest_path,
+    outbound_path,
     single_source_distances,
 )
 from app.graph.model import path_to_candidate
@@ -60,6 +60,7 @@ def round_pairs(
     target_distance_m: float,
     count: int,
     radius_scale: float = 1.0,
+    paths: dict[int, list[int]] | None = None,
 ) -> list[tuple[RouteCandidate, list[int]]]:
     """(candidate, loop_node_path) pairs ranked roundest first.
 
@@ -81,7 +82,7 @@ def round_pairs(
 
     for turnaround, _dist in turnarounds:
         try:
-            outbound = shortest_path(graph, start_node, turnaround)
+            outbound = outbound_path(graph, start_node, turnaround, paths)
         except RouteNotFoundError:
             continue
 
