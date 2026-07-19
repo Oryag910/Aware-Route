@@ -4,7 +4,7 @@ import networkx as nx
 
 from app.amenities.snapping import SnappedAmenity, amenities_in_range
 from app.generation.length_tune import tune_pair_to_target
-from app.generation.turnarounds import select_turnarounds
+from app.generation.shape_metrics import isoperimetric_quotient
 from app.graph.distances import (
     nearest_node,
     shortest_path,
@@ -87,52 +87,29 @@ def _round_through_pair(
     amenity_node: int,
     target_distance_m: float,
 ) -> tuple[RouteCandidate, list[int]] | None:
-    """Round route through `amenity_node`: walk out to it, continue to a
-    turnaround at the remaining half-target radius, then return via a
-    reuse-penalised path preferring streets not already walked."""
+    """Round loop with `amenity_node` as its far point: walk out to the
+    amenity, then return by a reuse-penalised path that prefers streets
+    not already walked, so the two legs enclose real area instead of
+    doubling back. The residual to target length is absorbed by the
+    tuner.
+
+    The old approach walked to the amenity then bolted on a tiny
+    ``target/2 - amenity_dist`` loop at the far end, which for a typical
+    (amenity near the half-target radius) request left almost no radius
+    for a real loop and produced a straight there-and-back with a nub.
+    Treating the amenity as the loop's turnaround instead keeps the full
+    radius available for enclosing area.
+    """
     try:
-        outbound_to_amenity = shortest_path(graph, start_node, amenity_node)
+        outbound = shortest_path(graph, start_node, amenity_node)
     except RouteNotFoundError:
         return None
 
-    amenity_dist = dists.get(amenity_node)
-    if amenity_dist is None:
-        return None
-
-    remaining_radius_m = (target_distance_m / 2.0) - amenity_dist
-    if remaining_radius_m <= 0:
-        return None
-
-    dists_from_amenity = single_source_distances(graph, amenity_node)
-    turnarounds = select_turnarounds(
-        graph,
-        amenity_node,
-        dists_from_amenity,
-        remaining_radius_m,
-        count=1,
-        prefer_straight=False,
-    )
-    if not turnarounds:
-        return None
-
-    turnaround_node, _dist = turnarounds[0]
-
-    try:
-        amenity_to_turnaround = shortest_path(
-            graph, amenity_node, turnaround_node
-        )
-    except RouteNotFoundError:
-        return None
-
-    outbound_full = outbound_to_amenity + amenity_to_turnaround[1:]
-
-    return_path = _return_path(
-        graph, turnaround_node, start_node, outbound_full
-    )
+    return_path = _return_path(graph, amenity_node, start_node, outbound)
     if return_path is None:
         return None
 
-    loop = outbound_full + return_path[1:]
+    loop = outbound + return_path[1:]
     candidate = path_to_candidate(graph, loop)
 
     return tune_pair_to_target(
@@ -156,8 +133,10 @@ def through_amenities_pairs(
     also returns each candidate's node_path and the concrete shape
     ("round"/"out_and_back") that produced it, needed by
     `app.generation.engine.generate_routes` to compute node-path-based
-    QualityMetrics. "mix" picks whichever of the two sub-shapes best
-    hits the target, same as the candidate-only path.
+    QualityMetrics. "mix" keeps both sub-shapes it can build and lets the
+    shape-aware ranking below order them (rounder first), so a mix request
+    surfaces genuine loops rather than collapsing to the out-and-back that
+    merely happened to fit the target distance best.
     """
     start_node = nearest_node(graph, start)
     dists = single_source_distances(graph, start_node)
@@ -188,20 +167,35 @@ def through_amenities_pairs(
         if not produced:
             continue
 
-        if shape == "mix":
-            best = min(
-                produced,
-                key=lambda t: abs(t[0].distance_m - target_distance_m),
-            )
-            triples.append(best)
-        else:
-            triples.extend(produced)
+        triples.extend(produced)
 
-    triples.sort(
-        key=lambda triple: abs(triple[0].distance_m - target_distance_m)
-    )
+    triples.sort(key=_ranking_key(shape, target_distance_m))
 
     return _dedup_triples(triples)[:count]
+
+
+def _ranking_key(
+    shape: Shape, target_distance_m: float
+) -> Any:
+    """Order amenity-passing triples for the requested shape.
+
+    "out_and_back" cares only about hitting the target length. "round"
+    and "mix" prefer rounder routes first (by isoperimetric quotient),
+    breaking ties by distance error -- this is what surfaces genuine
+    loops ahead of the out-and-backs that fit distance better but ignore
+    the requested shape.
+    """
+
+    def key(
+        triple: tuple[RouteCandidate, list[int], Shape],
+    ) -> tuple[float, float]:
+        candidate = triple[0]
+        distance_error = abs(candidate.distance_m - target_distance_m)
+        if shape == "out_and_back":
+            return (0.0, distance_error)
+        return (-isoperimetric_quotient(candidate.geometry), distance_error)
+
+    return key
 
 
 def generate_through_amenities(

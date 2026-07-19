@@ -286,7 +286,12 @@ def test_routes_with_restroom_success() -> None:
         "latitude",
         "longitude",
         "mile_marker_m",
+        "kind",
     }
+
+    # ORS pipeline only matches Supabase restrooms, so kind is always
+    # "restroom" here.
+    assert restroom_response["kind"] == "restroom"
 
     assert (
         restroom_response["facility_name"]

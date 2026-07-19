@@ -40,7 +40,7 @@ MAX_DISTANCE_ERROR_M = 100.0
 MAX_AMENITY_RANGE_ERROR_M = 500.0
 
 
-ElevationPreference = Literal["flat", "moderate", "hilly"]
+ElevationPreference = Literal["flat", "moderate", "hilly", "any"]
 
 
 @dataclass(frozen=True)
@@ -146,6 +146,11 @@ def _elevation(
 
     gain_per_km = elevation_gain_m / (distance_m / 1000.0)
     bucket = elevation_bucket(gain_per_km)
+    # "any": the runner doesn't care about hilliness, so this factor is
+    # neutral and overall route quality decides. Still report the bucket
+    # for display.
+    if preference == "any":
+        return 0.0, bucket
     penalty = abs(
         BUCKET_ORDER.index(bucket) - BUCKET_ORDER.index(preference)
     ) / (len(BUCKET_ORDER) - 1)

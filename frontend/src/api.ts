@@ -13,6 +13,10 @@ export type RestroomInfo = {
   latitude: number;
   longitude: number;
   mile_marker_m: number;
+  // "restroom" | "fountain" — which amenity kind, so the map can pick a
+  // distinct marker. Backend defaults to "restroom" (ORS pipeline); the
+  // local pipeline sends the real kind.
+  kind: "restroom" | "fountain";
 };
 
 export type RankedRoute = {

@@ -1,1 +1,45 @@
 @import "tailwindcss";
+
+@theme {
+  --font-display: "Fraunces", serif;
+  --font-body: "Inter", sans-serif;
+
+  /* surfaces */
+  --color-background: #f7f5ef; /* warm parchment page bg */
+  --color-surface: #ffffff; /* cards, panels */
+  --color-surface-muted: #efebe1; /* recessed / collapsed form bar */
+
+  /* brand */
+  --color-primary: #3f6b4f; /* deep moss green */
+  --color-primary-hover: #345a42;
+  --color-on-primary: #f7f5ef; /* text/icon on green */
+  --color-secondary: #7a6a53; /* bark/earth brown */
+  --color-accent-sky: #5b8aa6; /* water / links */
+
+  /* semantic states */
+  --color-success: #3f6b4f; /* "Matched" — a match is the good outcome */
+  --color-warning: #8a6a2e; /* "Closest available" / tradeoff */
+  --color-danger: #9c4a3c; /* errors */
+
+  /* text + structure */
+  --color-ink: #2b2a25; /* headings, body */
+  --color-ink-muted: #6b6759; /* captions, secondary */
+  --color-border: #ddd6c6;
+}
+
+body {
+  font-family: var(--font-body);
+  background-color: var(--color-background);
+  color: var(--color-ink);
+}
+
+/* Leaflet: strip default divIcon chrome + show a clickable cursor on
+   interactive vector layers (routes). */
+.aware-marker {
+  background: transparent;
+  border: none;
+}
+
+.leaflet-interactive {
+  cursor: pointer;
+}
