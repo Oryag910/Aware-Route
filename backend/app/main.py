@@ -1,9 +1,11 @@
 import logging
 import os
+from contextlib import asynccontextmanager
+from collections.abc import AsyncIterator
 from datetime import datetime
 from typing import Annotated, Literal
 
-from fastapi import Depends, FastAPI, HTTPException
+from fastapi import Depends, FastAPI, HTTPException, Response
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
@@ -52,7 +54,38 @@ from app.routing.provider import (
 
 logger = logging.getLogger(__name__)
 
-app = FastAPI(title="Aware Running Route API")
+# Route-generation engine: "ors" (default, the legacy OpenRouteService
+# pipeline) or "local" (the in-process OSMnx walk graph). Set via env so
+# switching -- or rolling back -- is a deploy-time flag, not a code change.
+# Defaults to "ors" so production behaviour is unchanged until explicitly
+# flipped.
+ROUTING_ENGINE = os.environ.get("ROUTING_ENGINE", "ors").strip().lower()
+
+
+@asynccontextmanager
+async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
+    """Load the walk graph once at boot when the local engine is active.
+
+    Doing this eagerly (rather than lazily on the first request) means a
+    broken/missing graph artifact surfaces as a single loud boot-time log
+    line instead of a silent per-request ORS fallback, and no request ever
+    pays the ~200MB load cost or races it. The load is best-effort: if it
+    fails we log loudly but keep serving, since the per-request handler
+    still has the ORS fallback as a safety net.
+    """
+    if ROUTING_ENGINE == "local":
+        try:
+            get_graph()
+            logger.info("Local routing engine graph loaded at startup")
+        except Exception:
+            logger.exception(
+                "ROUTING_ENGINE=local but the walk graph failed to load at "
+                "startup; requests will fall back to ORS until this is fixed"
+            )
+    yield
+
+
+app = FastAPI(title="Aware Running Route API", lifespan=lifespan)
 
 # Dev relies on the Vite proxy, so no CORS is needed there -- only add
 # the middleware when ALLOWED_ORIGINS is explicitly set (e.g. in
@@ -88,13 +121,6 @@ RESTROOM_FIRST_CANDIDATE_LIMIT = 4
 # rescue band, so they'd only ever clutter the fallback ranking and
 # displace genuinely-close candidates -- drop them outright.
 MAX_CANDIDATE_DISTANCE_RATIO = 3.0
-
-# Route-generation engine: "ors" (default, the legacy OpenRouteService
-# pipeline) or "local" (the in-process OSMnx walk graph). Set via env so
-# switching -- or rolling back -- is a deploy-time flag, not a code change.
-# Defaults to "ors" so production behaviour is unchanged until explicitly
-# flipped.
-ROUTING_ENGINE = os.environ.get("ROUTING_ENGINE", "ors").strip().lower()
 
 
 class RouteRequest(BaseModel):
@@ -386,6 +412,7 @@ def _build_local_responses(
 )
 def get_routes_with_restroom(
     request: RestroomRouteRequest,
+    response: Response,
     provider: Annotated[
         RoutingProvider,
         Depends(get_routing_provider),
@@ -399,11 +426,16 @@ def get_routes_with_restroom(
         Depends(get_interruption_store),
     ],
 ) -> list[RankedRouteResponse]:
+    # Records which engine actually served the response (visible in the
+    # browser Network tab), so a silent ORS fallback can never masquerade
+    # as the local engine.
     if ROUTING_ENGINE == "local":
         try:
-            return _build_local_responses(
+            result = _build_local_responses(
                 request, restrooms, interruption_store
             )
+            response.headers["X-Route-Engine"] = "local"
+            return result
         except HTTPException:
             # Honest no-match (422) or client error: return it, do NOT
             # fall back to ORS.
@@ -415,6 +447,8 @@ def get_routes_with_restroom(
             logger.exception(
                 "Local routing engine failed; falling back to ORS"
             )
+
+    response.headers["X-Route-Engine"] = "ors"
 
     start = Coordinate(
         lat=request.start_lat,
