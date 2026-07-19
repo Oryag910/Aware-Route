@@ -1,4 +1,7 @@
-FROM python:3.12-slim
+# Must match the Python version that built the committed graph pickle
+# (see data/manhattan_walk_graph.v1.manifest.json -> python_version), or the
+# graph fails to unpickle at runtime and the app falls back to ORS.
+FROM python:3.14-slim
 
 WORKDIR /app
 

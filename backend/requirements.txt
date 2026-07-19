@@ -7,3 +7,12 @@ ruff
 mypy
 osmnx==2.1.0
 scikit-learn==1.9.0
+# The committed graph pickle (data/manhattan_walk_graph.v1.pkl) embeds
+# networkx / numpy / shapely objects and must be unpickled with the SAME
+# library versions that built it, or pickle.load fails at runtime and the
+# app silently falls back to ORS. These are pinned to the build env recorded
+# in the artifact manifest (python 3.14.3) -- keep them in lockstep with the
+# manifest whenever the graph is regenerated.
+networkx==3.6.1
+numpy==2.5.1
+shapely==2.1.2
