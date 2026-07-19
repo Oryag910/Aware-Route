@@ -1,13 +1,82 @@
 import networkx as nx
 
 from app.amenities.models import Amenity
-from app.amenities.snapping import snap_amenities
-from app.generation.amenity_first import generate_through_amenities
+from app.amenities.snapping import SnappedAmenity, snap_amenities
+from app.generation.amenity_first import (
+    _select_placements,
+    generate_through_amenities,
+)
 from app.graph.model import node_coordinate
 from tests.amenities.conftest import ORIGIN, ORIGIN_NODE
 
 
 NORTH_INNER_NODE = 101
+
+
+def _snapped_at(
+    node_id: int, distance_m: float
+) -> tuple[SnappedAmenity, dict[int, float]]:
+    entry = SnappedAmenity(
+        amenity=Amenity(lat=0.0, lon=0.0, kind="restroom", name=None),
+        node_id=node_id,
+        snap_distance_m=0.0,
+    )
+    return entry, {node_id: distance_m}
+
+
+def test_select_placements_satisfies_high_range_on_the_return_leg() -> None:
+    """A restroom only 2km from start satisfies a "mile 7-8" ask on a 10km
+    out-and-back, because it is passed again at cumulative target-d on the
+    way back."""
+    entry, dists = _snapped_at(node_id=1, distance_m=2000.0)
+
+    placements = _select_placements(
+        [entry], dists, target_distance_m=10000.0,
+        min_range_m=7000.0, max_range_m=8000.0, shape="out_and_back", count=3,
+    )
+
+    assert len(placements) == 1
+    assert placements[0].on_return is True
+    assert abs(placements[0].cumulative_target - 8000.0) < 1e-6
+
+
+def test_select_placements_uses_outbound_leg_when_range_is_near() -> None:
+    entry, dists = _snapped_at(node_id=1, distance_m=2000.0)
+
+    placements = _select_placements(
+        [entry], dists, target_distance_m=10000.0,
+        min_range_m=1500.0, max_range_m=2500.0, shape="out_and_back", count=3,
+    )
+
+    assert len(placements) == 1
+    assert placements[0].on_return is False
+    assert abs(placements[0].cumulative_target - 2000.0) < 1e-6
+
+
+def test_select_placements_round_does_not_offer_return_leg() -> None:
+    """A loop passes each point once, so a near restroom cannot satisfy a
+    far range for the round shape (only out-and-back's return leg can)."""
+    entry, dists = _snapped_at(node_id=1, distance_m=2000.0)
+
+    placements = _select_placements(
+        [entry], dists, target_distance_m=10000.0,
+        min_range_m=7000.0, max_range_m=8000.0, shape="round", count=3,
+    )
+
+    assert placements == []
+
+
+def test_select_placements_skips_restrooms_beyond_half_target() -> None:
+    """A point more than half a there-and-back away can't be reached within
+    the target, so it is never selected regardless of range."""
+    entry, dists = _snapped_at(node_id=1, distance_m=6000.0)
+
+    placements = _select_placements(
+        [entry], dists, target_distance_m=10000.0,
+        min_range_m=5000.0, max_range_m=6000.0, shape="out_and_back", count=3,
+    )
+
+    assert placements == []
 
 
 def _amenity_at(graph: nx.MultiDiGraph, node_id: int) -> Amenity:
