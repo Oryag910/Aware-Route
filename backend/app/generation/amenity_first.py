@@ -7,8 +7,8 @@ from app.generation.length_tune import tune_pair_to_target
 from app.generation.shape_metrics import isoperimetric_quotient
 from app.graph.distances import (
     nearest_node,
-    shortest_path,
-    single_source_distances,
+    outbound_path,
+    single_source_paths,
 )
 from app.graph.model import path_to_candidate
 from app.routing.errors import RouteNotFoundError
@@ -61,6 +61,7 @@ def _out_and_back_through_pair(
     dists: dict[int, float],
     amenity_node: int,
     target_distance_m: float,
+    paths: dict[int, list[int]] | None = None,
 ) -> tuple[RouteCandidate, list[int]] | None:
     """Out-and-back through `amenity_node`: walk out to it and retrace
     home, then spur the residual to hit target length. The amenity sits
@@ -68,7 +69,7 @@ def _out_and_back_through_pair(
     undershoots and the spur fills the rest -- the amenity ends up on
     the route at the requested range."""
     try:
-        path = shortest_path(graph, start_node, amenity_node)
+        path = outbound_path(graph, start_node, amenity_node, paths)
     except RouteNotFoundError:
         return None
 
@@ -76,7 +77,13 @@ def _out_and_back_through_pair(
     candidate = path_to_candidate(graph, out_and_back)
 
     return tune_pair_to_target(
-        graph, start_node, candidate, out_and_back, target_distance_m, dists=dists
+        graph,
+        start_node,
+        candidate,
+        out_and_back,
+        target_distance_m,
+        dists=dists,
+        paths=paths,
     )
 
 
@@ -86,6 +93,7 @@ def _round_through_pair(
     dists: dict[int, float],
     amenity_node: int,
     target_distance_m: float,
+    paths: dict[int, list[int]] | None = None,
 ) -> tuple[RouteCandidate, list[int]] | None:
     """Round loop with `amenity_node` as its far point: walk out to the
     amenity, then return by a reuse-penalised path that prefers streets
@@ -101,7 +109,7 @@ def _round_through_pair(
     radius available for enclosing area.
     """
     try:
-        outbound = shortest_path(graph, start_node, amenity_node)
+        outbound = outbound_path(graph, start_node, amenity_node, paths)
     except RouteNotFoundError:
         return None
 
@@ -113,7 +121,13 @@ def _round_through_pair(
     candidate = path_to_candidate(graph, loop)
 
     return tune_pair_to_target(
-        graph, start_node, candidate, loop, target_distance_m, dists=dists
+        graph,
+        start_node,
+        candidate,
+        loop,
+        target_distance_m,
+        dists=dists,
+        paths=paths,
     )
 
 
@@ -126,6 +140,8 @@ def through_amenities_pairs(
     max_range_m: float,
     shape: Shape,
     count: int,
+    dists: dict[int, float] | None = None,
+    paths: dict[int, list[int]] | None = None,
 ) -> list[tuple[RouteCandidate, list[int], Shape]]:
     """(candidate, node_path, shape) triples for amenity-passing routes.
 
@@ -139,7 +155,8 @@ def through_amenities_pairs(
     merely happened to fit the target distance best.
     """
     start_node = nearest_node(graph, start)
-    dists = single_source_distances(graph, start_node)
+    if dists is None:
+        dists, paths = single_source_paths(graph, start_node)
 
     in_range = amenities_in_range(snapped, dists, min_range_m, max_range_m)
     pool = in_range[: count * CANDIDATE_MULTIPLIER]
@@ -152,14 +169,14 @@ def through_amenities_pairs(
 
         if shape in ("out_and_back", "mix"):
             oab = _out_and_back_through_pair(
-                graph, start_node, dists, amenity_node, target_distance_m
+                graph, start_node, dists, amenity_node, target_distance_m, paths
             )
             if oab is not None:
                 produced.append((oab[0], oab[1], "out_and_back"))
 
         if shape in ("round", "mix"):
             loop = _round_through_pair(
-                graph, start_node, dists, amenity_node, target_distance_m
+                graph, start_node, dists, amenity_node, target_distance_m, paths
             )
             if loop is not None:
                 produced.append((loop[0], loop[1], "round"))

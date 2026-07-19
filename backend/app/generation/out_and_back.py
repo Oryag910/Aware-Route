@@ -1,16 +1,21 @@
 from typing import Any
 
 from app.generation.turnarounds import select_turnarounds
-from app.graph.distances import shortest_path, single_source_distances
+from app.graph.distances import outbound_path, single_source_distances
 from app.graph.model import node_coordinate, path_to_candidate
 from app.routing.errors import RouteNotFoundError
 from app.routing.geometry import bearing_deg
 from app.routing.provider import Coordinate, RouteCandidate
 
 
-def out_and_back_path(graph: Any, start_node: int, turnaround: int) -> list[int]:
+def out_and_back_path(
+    graph: Any,
+    start_node: int,
+    turnaround: int,
+    paths: dict[int, list[int]] | None = None,
+) -> list[int]:
     """Node path that walks start -> turnaround and retraces back."""
-    path = shortest_path(graph, start_node, turnaround)
+    path = outbound_path(graph, start_node, turnaround, paths)
     return path + list(reversed(path))[1:]
 
 
@@ -21,6 +26,7 @@ def out_and_back_pairs(
     target_distance_m: float,
     count: int,
     radius_scale: float = 1.0,
+    paths: dict[int, list[int]] | None = None,
 ) -> list[tuple[RouteCandidate, list[int]]]:
     """(candidate, node_path) out-and-back pairs, most-diverse-by-bearing
     first. Shared by the public generator and the length tuner so both
@@ -40,7 +46,7 @@ def out_and_back_pairs(
 
     for turnaround, _dist in turnarounds:
         try:
-            full = out_and_back_path(graph, start_node, turnaround)
+            full = out_and_back_path(graph, start_node, turnaround, paths)
         except RouteNotFoundError:
             continue
 

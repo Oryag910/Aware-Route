@@ -1,7 +1,7 @@
 from typing import Any, Callable
 
 from app.generation.turnarounds import select_turnarounds
-from app.graph.distances import shortest_path, single_source_distances
+from app.graph.distances import outbound_path, single_source_distances
 from app.graph.model import path_distance_m, path_to_candidate
 from app.routing.errors import RouteNotFoundError
 from app.routing.provider import RouteCandidate
@@ -21,6 +21,7 @@ def _spur_path(
     start_node: int,
     dists: dict[int, float],
     deficit_m: float,
+    paths: dict[int, list[int]] | None = None,
 ) -> list[int] | None:
     """A short out-and-back node path from start absorbing ~`deficit_m`.
 
@@ -44,7 +45,7 @@ def _spur_path(
 
         spur_target, _dist = turnarounds[0]
         try:
-            spur = shortest_path(graph, start_node, spur_target)
+            spur = outbound_path(graph, start_node, spur_target, paths)
         except RouteNotFoundError:
             continue
 
@@ -67,6 +68,7 @@ def tune_pair_to_target(
     target_distance_m: float,
     tolerance_m: float = DEFAULT_TOLERANCE_M,
     dists: dict[int, float] | None = None,
+    paths: dict[int, list[int]] | None = None,
 ) -> tuple[RouteCandidate, list[int]]:
     """Nudge a candidate's length toward the target with a spur, also
     returning the (possibly spur-spliced) node_path in sync with the
@@ -90,7 +92,7 @@ def tune_pair_to_target(
     if dists is None:
         dists = single_source_distances(graph, start_node)
 
-    spur = _spur_path(graph, start_node, dists, deficit_m)
+    spur = _spur_path(graph, start_node, dists, deficit_m, paths)
     if spur is None:
         return candidate, node_path
 
@@ -128,6 +130,7 @@ def tune_generator_pairs_to_target(
     generate: Callable[[float], list[tuple[RouteCandidate, list[int]]]],
     target_distance_m: float,
     tolerance_m: float = DEFAULT_TOLERANCE_M,
+    paths: dict[int, list[int]] | None = None,
 ) -> list[tuple[RouteCandidate, list[int]]]:
     """Drive a radius-scaled generator to the target length, keeping
     each tuned candidate's node_path alongside it. `tune_generator_to_target`
@@ -179,6 +182,7 @@ def tune_generator_pairs_to_target(
             target_distance_m,
             tolerance_m,
             dists,
+            paths,
         )
         for candidate, node_path in pairs
     ]
