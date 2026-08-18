@@ -7,6 +7,15 @@ hard constraint above one that passes. Soft factors are shape-aware --
 e.g. edge reuse is a defect for a loop but the defining trait of an
 out-and-back, so its weight is zeroed for that shape.
 
+The amenity pool passed in mixes restrooms and fountains, but `matched`
+is a restroom-specific product contract (this ranker only backs
+`/routes/with-restroom`) -- a fountain in range must never satisfy it.
+`_partial_for` matches restroom-kind amenities separately and only
+falls back to the full pool (fountains included) for the *displayed*
+amenity when no restroom is on the route, so an unmatched route still
+surfaces something useful without ever claiming a fountain is a
+restroom match.
+
 Deliberately separate from `app/restrooms/scoring.py` (the ORS scorer):
 that one ranks ORS candidates with ORS-derived surface data, this one
 ranks local candidates with graph-native metrics. The ORS scorer stays
@@ -191,15 +200,31 @@ def _partial_for(
     candidate = route.candidate
     quality = route.quality
 
+    # The restroom mile-range constraint can only be satisfied by an
+    # actual restroom -- a fountain must never substitute for it. Restrict
+    # matching to restroom-kind amenities for the hard-constraint check;
+    # only fall back to the full (restroom + fountain) pool for display
+    # when no restroom is on the route at all, so a route is still
+    # informative ("closest available") rather than dropped outright.
+    restroom_amenities = [a for a in amenities if a.kind == "restroom"]
+    restroom_matches = match_amenities_to_route(
+        candidate.geometry, restroom_amenities
+    )
+    restroom_best = best_amenity_for_range(
+        restroom_matches, min_range_m, max_range_m
+    )
+
     matches = match_amenities_to_route(candidate.geometry, amenities)
     best = best_amenity_for_range(matches, min_range_m, max_range_m)
 
+    display_amenity = restroom_best if restroom_best is not None else best
+
     distance_error = abs(candidate.distance_m - target_distance_m)
-    if best is not None:
+    if display_amenity is not None:
         amenity_range_error = mile_range_error_m(
-            best.mile_marker_m, min_range_m, max_range_m
+            display_amenity.mile_marker_m, min_range_m, max_range_m
         )
-        off_route = best.distance_to_route_m
+        off_route = display_amenity.distance_to_route_m
     else:
         amenity_range_error = float("inf")
         off_route = float("inf")
@@ -207,6 +232,7 @@ def _partial_for(
     matched = (
         len(candidate.geometry) >= 2
         and distance_error <= MAX_DISTANCE_ERROR_M
+        and restroom_best is not None
         and amenity_range_error <= MAX_AMENITY_RANGE_ERROR_M
     )
 
@@ -237,7 +263,7 @@ def _partial_for(
     return _Partial(
         route=route,
         matched=matched,
-        best_amenity=best,
+        best_amenity=display_amenity,
         distance_error_m=distance_error,
         amenity_range_error_m=amenity_range_error,
         off_route_distance_m=off_route,

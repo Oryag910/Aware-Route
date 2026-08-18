@@ -203,8 +203,28 @@ def get_routing_provider() -> RoutingProvider:
 
 
 def get_eligible_restrooms() -> list[Restroom]:
-    client = get_supabase_client()
-    return fetch_eligible_restrooms(client)
+    """Fetch restrooms from Supabase, as a FastAPI dependency.
+
+    Runs before the route handler body (and thus before routing-engine
+    selection), so a Supabase outage here must fail loudly and cleanly
+    rather than let an unhandled exception surface as an opaque 500 --
+    or, worse, let the handler proceed as if restroom data were
+    available. The detail message is deliberately generic: the raw
+    exception can carry credentials/URLs in its message, so only the
+    server-side log gets the real cause.
+    """
+    try:
+        client = get_supabase_client()
+        return fetch_eligible_restrooms(client)
+    except Exception as exc:
+        logger.exception(
+            "Failed to fetch restroom data from Supabase; "
+            "returning 503 to the client"
+        )
+        raise HTTPException(
+            status_code=503,
+            detail="Restroom data is temporarily unavailable",
+        ) from exc
 
 
 def get_interruption_store() -> InterruptionStore:
@@ -395,9 +415,15 @@ def _build_local_responses(
     with_amenity = [s for s in scored if s.best_amenity is not None]
 
     if not with_amenity:
+        # Header set explicitly here (not via the `response` object) --
+        # Starlette builds error responses from the raised exception, not
+        # from headers mutated on the injected Response, so this is the
+        # only way an error response can truthfully claim the local
+        # engine produced it.
         raise HTTPException(
             status_code=422,
             detail="No candidate route passed an eligible restroom in range",
+            headers={"X-Route-Engine": "local"},
         )
 
     return [
