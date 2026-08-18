@@ -15,12 +15,17 @@ function restroomFact(route: RankedRoute): string {
   const mile = formatMiles(route.restroom.mile_marker_m);
   const name = route.restroom.facility_name;
   const offRouteM = Math.round(route.off_route_distance_m);
+  // The backend can surface a fountain here as a "closest available"
+  // fallback when no restroom is in range (route.matched === false) --
+  // label it as a fountain, not a restroom, so that fallback is never
+  // mistaken for a satisfied restroom request.
+  const label = route.restroom.kind === "fountain" ? "Water fountain" : "Restroom";
 
   if (route.off_route_distance_m <= ON_ROUTE_THRESHOLD_M) {
-    return `Restroom at mile ${mile} (${name}) — ${offRouteM} m off-route`;
+    return `${label} at mile ${mile} (${name}) — ${offRouteM} m off-route`;
   }
 
-  return `Restroom at mile ${mile} (${name}) — ~${offRouteM} m detour required`;
+  return `${label} at mile ${mile} (${name}) — ~${offRouteM} m detour required`;
 }
 
 function climbFact(route: RankedRoute): string | null {

@@ -48,11 +48,15 @@ def _route(
 
 
 # A geometry that passes an amenity, so a route can satisfy the amenity
-# hard constraint. Amenity sits on the middle vertex.
+# hard constraint. Amenity sits on the middle vertex. `matched` is a
+# restroom-specific contract (this ranker only backs
+# /routes/with-restroom), so these default fixtures are restroom-kind --
+# see test_fountain_does_not_satisfy_restroom_match below for the
+# fountain-specific contract tests.
 _GEO_A = _line([(40.70, -74.00), (40.71, -74.00), (40.72, -74.00)])
 _GEO_B = _line([(40.70, -73.95), (40.71, -73.95), (40.72, -73.95)])
-_AMENITY_A = Amenity(lat=40.71, lon=-74.00, kind="fountain", name=None)
-_AMENITY_B = Amenity(lat=40.71, lon=-73.95, kind="fountain", name=None)
+_AMENITY_A = Amenity(lat=40.71, lon=-74.00, kind="restroom", name=None)
+_AMENITY_B = Amenity(lat=40.71, lon=-73.95, kind="restroom", name=None)
 _WIDE_RANGE = (0.0, 100_000.0)  # any matched amenity is "in range"
 
 
@@ -176,3 +180,73 @@ def test_interpretable_fields_populated() -> None:
     assert scored.distance_error_m == 0.0
     assert scored.best_amenity is not None
     assert 0.0 <= scored.composite_score <= 1.0
+
+
+def test_fountain_does_not_satisfy_restroom_match() -> None:
+    """A fountain in range must never make /routes/with-restroom's
+    `matched` true -- only a restroom satisfies the restroom
+    mile-range constraint."""
+    fountain = Amenity(lat=40.71, lon=-74.00, kind="fountain", name=None)
+    route = _route(_GEO_A, 5000.0)  # distance error 0, fountain in range
+
+    scored = score_local_routes(
+        [route],
+        [fountain],
+        target_distance_m=5000.0,
+        min_range_m=_WIDE_RANGE[0],
+        max_range_m=_WIDE_RANGE[1],
+        elevation_preference="flat",
+        shape="round",
+        interruption_store=EMPTY_STORE,
+        count=5,
+    )
+
+    assert scored[0].matched is False
+    # Still surfaced for display ("closest available"), but unambiguously
+    # a fountain, not a restroom standing in for one.
+    assert scored[0].best_amenity is not None
+    assert scored[0].best_amenity.amenity.kind == "fountain"
+
+
+def test_restroom_preferred_over_closer_fountain() -> None:
+    """When both a restroom and a fountain are on-route, but only the
+    fountain actually falls inside the requested mile range, the route
+    must still be scored against the restroom -- a well-placed fountain
+    must never flip `matched` to True on the restroom's behalf, even
+    though (pre-fix) picking the amenity pool's best-fit candidate
+    regardless of kind would have done exactly that."""
+    geometry = _line(
+        [
+            (40.70, -74.00),
+            (40.71, -74.00),  # restroom here, mile marker ~1112m
+            (40.72, -74.00),  # fountain here, mile marker ~2224m
+            (40.73, -74.00),
+        ]
+    )
+    restroom = Amenity(lat=40.71, lon=-74.00, kind="restroom", name=None)
+    fountain = Amenity(lat=40.72, lon=-74.00, kind="fountain", name=None)
+    route = _route(geometry, 5000.0)
+
+    # Requested band brackets the fountain (mile ~2224m) but sits ~888m
+    # beyond the restroom (mile ~1112m) -- well outside the 500m hard
+    # constraint tolerance, so only the fountain "fits" by distance alone.
+    min_range_m = 2000.0
+    max_range_m = 2500.0
+
+    scored = score_local_routes(
+        [route],
+        [restroom, fountain],
+        target_distance_m=5000.0,
+        min_range_m=min_range_m,
+        max_range_m=max_range_m,
+        elevation_preference="flat",
+        shape="round",
+        interruption_store=EMPTY_STORE,
+        count=5,
+    )
+
+    # The fountain fits the band; the restroom doesn't -- so the route
+    # must be unmatched, not matched via the fountain.
+    assert scored[0].matched is False
+    assert scored[0].best_amenity is not None
+    assert scored[0].best_amenity.amenity.kind == "restroom"

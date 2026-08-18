@@ -15,3 +15,8 @@ services:
         sync: false
       - key: ALLOWED_ORIGINS
         sync: false
+      # Not a secret -- declared so the checked-in config reproduces the
+      # dashboard-configured production value instead of silently
+      # defaulting to "ors" (see app/main.py).
+      - key: ROUTING_ENGINE
+        value: local
