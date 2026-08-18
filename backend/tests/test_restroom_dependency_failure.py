@@ -11,7 +11,7 @@ from collections.abc import Iterator
 import pytest
 from fastapi.testclient import TestClient
 
-from app.main import app, get_interruption_store, get_routing_provider
+from app.main import app, get_interruption_store
 from app.flow.interruptions import InterruptionStore
 from app.rate_limit import rate_limit_dependency
 from app.routing.provider import Coordinate, RouteCandidate
@@ -77,7 +77,7 @@ def test_supabase_failure_returns_503(monkeypatch: pytest.MonkeyPatch) -> None:
 
     monkeypatch.setattr("app.main.get_supabase_client", _boom)
     provider = RoutingMustNotBeCalledProvider()
-    app.dependency_overrides[get_routing_provider] = lambda: provider
+    monkeypatch.setattr("app.main.get_routing_provider", lambda: provider)
 
     response = client.post("/routes/with-restroom", json=_request_body())
 
@@ -99,8 +99,9 @@ def test_supabase_failure_detail_does_not_leak_exception_internals(
         )
 
     monkeypatch.setattr("app.main.get_supabase_client", _boom)
-    app.dependency_overrides[get_routing_provider] = (
-        lambda: RoutingMustNotBeCalledProvider()
+    monkeypatch.setattr(
+        "app.main.get_routing_provider",
+        lambda: RoutingMustNotBeCalledProvider(),
     )
 
     response = client.post("/routes/with-restroom", json=_request_body())
@@ -118,7 +119,7 @@ def test_supabase_failure_does_not_invoke_routing_or_ors_fallback(
         lambda: (_ for _ in ()).throw(RuntimeError("simulated outage")),
     )
     provider = RoutingMustNotBeCalledProvider()
-    app.dependency_overrides[get_routing_provider] = lambda: provider
+    monkeypatch.setattr("app.main.get_routing_provider", lambda: provider)
 
     response = client.post("/routes/with-restroom", json=_request_body())
 
@@ -138,8 +139,9 @@ def test_supabase_failure_does_not_claim_local_engine_served_it(
         raise RuntimeError("simulated outage")
 
     monkeypatch.setattr("app.main.get_supabase_client", _boom)
-    app.dependency_overrides[get_routing_provider] = (
-        lambda: RoutingMustNotBeCalledProvider()
+    monkeypatch.setattr(
+        "app.main.get_routing_provider",
+        lambda: RoutingMustNotBeCalledProvider(),
     )
 
     response = client.post("/routes/with-restroom", json=_request_body())

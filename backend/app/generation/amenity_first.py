@@ -1,14 +1,13 @@
 from dataclasses import dataclass
 from typing import Any, Literal
 
-import networkx as nx
-
 from app.amenities.snapping import SnappedAmenity
 from app.generation.length_tune import (
     DEFAULT_TOLERANCE_M,
     _spur_path,
     tune_pair_to_target,
 )
+from app.generation.reuse_penalty import REUSE_PENALTY, reuse_penalized_return_path
 from app.generation.shape_metrics import isoperimetric_quotient
 from app.graph.distances import (
     nearest_node,
@@ -27,10 +26,6 @@ Shape = Literal["round", "out_and_back", "mix"]
 # failures (unreachable turnaround, etc.) still leave enough candidates.
 CANDIDATE_MULTIPLIER = 2
 
-# Mirrors round_route.py's reuse-penalty technique so the return leg of
-# an amenity-first loop takes different streets than the outbound leg.
-REUSE_PENALTY = 4.0
-
 # Reuse penalties tried, roundest (most-avoiding of the outbound streets)
 # first. A heavier penalty forces a fresher -- and therefore longer --
 # return leg, so when the roundest loop overshoots the target the builder
@@ -38,40 +33,6 @@ REUSE_PENALTY = 4.0
 # a little roundness for hitting the distance. Penalty 1.0 is the plain
 # shortest path back (a there-and-back), which always fits.
 _RETURN_PENALTIES = (REUSE_PENALTY, 2.5, 1.6, 1.0)
-
-
-def _reuse_penalty_weight(
-    outbound_pairs: set[frozenset[int]], penalty: float = REUSE_PENALTY
-) -> Any:
-    def weight(u: int, v: int, edge_dict: dict[Any, dict[str, Any]]) -> float:
-        base = float(min(data["length"] for data in edge_dict.values()))
-        if frozenset((u, v)) in outbound_pairs:
-            return base * penalty
-        return base
-
-    return weight
-
-
-def _return_path(
-    graph: Any,
-    turnaround: int,
-    start_node: int,
-    outbound: list[int],
-    penalty: float = REUSE_PENALTY,
-) -> list[int] | None:
-    outbound_pairs = {
-        frozenset((u, v)) for u, v in zip(outbound, outbound[1:])
-    }
-    try:
-        path: list[int] = nx.shortest_path(
-            graph,
-            turnaround,
-            start_node,
-            weight=_reuse_penalty_weight(outbound_pairs, penalty),
-        )
-    except nx.NetworkXNoPath:
-        return None
-    return path
 
 
 @dataclass(frozen=True)
@@ -207,7 +168,7 @@ def _round_through_pair(
     best_distance = float("inf")
 
     for penalty in _RETURN_PENALTIES:
-        return_path = _return_path(
+        return_path = reuse_penalized_return_path(
             graph, amenity_node, start_node, outbound, penalty
         )
         if return_path is None:

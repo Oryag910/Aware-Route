@@ -18,12 +18,7 @@ from fastapi.testclient import TestClient
 
 from app.flow.interruptions import InterruptionStore
 from app.graph.loader import GRAPH_PATH
-from app.main import (
-    app,
-    get_eligible_restrooms,
-    get_interruption_store,
-    get_routing_provider,
-)
+from app.main import app, get_eligible_restrooms, get_interruption_store
 from app.rate_limit import rate_limit_dependency
 from app.restrooms.models import Restroom
 from app.routing.provider import Coordinate, RouteCandidate, RoutePoint
@@ -136,8 +131,9 @@ def test_local_engine_422_does_not_fall_back_to_ors(
         ) -> RouteCandidate:
             raise AssertionError("ORS must not be called on a local 422")
 
-    app.dependency_overrides[get_routing_provider] = (
-        lambda: RoutingMustNotBeCalledProvider()
+    monkeypatch.setattr(
+        "app.main.get_routing_provider",
+        lambda: RoutingMustNotBeCalledProvider(),
     )
 
     response = client.post(
@@ -207,7 +203,9 @@ def test_local_engine_falls_back_to_ors_on_graph_failure(
     )
 
     fake_provider = FakeProvider()
-    app.dependency_overrides[get_routing_provider] = lambda: fake_provider
+    monkeypatch.setattr(
+        "app.main.get_routing_provider", lambda: fake_provider
+    )
     app.dependency_overrides[get_eligible_restrooms] = lambda: [restroom]
 
     response = client.post(
