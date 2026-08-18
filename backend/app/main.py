@@ -46,7 +46,6 @@ from app.routing.errors import (
 from app.routing.repair import RepairTarget, repair_near_miss_candidates
 from app.routing.provider import (
     Coordinate,
-    RouteCandidate,
     RoutePoint,
     RoutingProvider,
 )
@@ -103,8 +102,6 @@ if _allowed_origins:
         allow_headers=["*"],
     )
 
-routing_provider = OpenRouteServiceProvider()
-
 # Internal candidate pool size for /routes/with-restroom, independent of
 # the request's `count` (which only controls how many *ranked* results
 # are returned). Split between blind round_trip candidates and
@@ -121,13 +118,6 @@ RESTROOM_FIRST_CANDIDATE_LIMIT = 4
 # rescue band, so they'd only ever clutter the fallback ranking and
 # displace genuinely-close candidates -- drop them outright.
 MAX_CANDIDATE_DISTANCE_RATIO = 3.0
-
-
-class RouteRequest(BaseModel):
-    start_lat: float
-    start_lon: float
-    target_distance_m: Annotated[float, Field(gt=0)]
-    count: Annotated[int, Field(ge=1, le=5)] = 3
 
 
 class RestroomRouteRequest(BaseModel):
@@ -199,7 +189,12 @@ class RankedRouteResponse(BaseModel):
 
 
 def get_routing_provider() -> RoutingProvider:
-    return routing_provider
+    """Constructs the ORS provider on demand.
+
+    Never called on the local-engine happy path -- only from the ORS
+    branch / local-fallback path of /routes/with-restroom -- so
+    ORS_API_KEY is only required when ORS actually needs to run."""
+    return OpenRouteServiceProvider()
 
 
 def get_eligible_restrooms() -> list[Restroom]:
@@ -234,38 +229,6 @@ def get_interruption_store() -> InterruptionStore:
 @app.get("/health")
 def health_check() -> dict[str, str]:
     return {"status": "ok"}
-
-
-@app.post("/routes", dependencies=[Depends(rate_limit_dependency)])
-def get_routes(
-    request: RouteRequest,
-    provider: Annotated[
-        RoutingProvider,
-        Depends(get_routing_provider),
-    ],
-) -> list[RouteCandidate]:
-    start = Coordinate(
-        lat=request.start_lat,
-        lon=request.start_lon,
-    )
-
-    try:
-        return get_loop_candidates(
-            provider,
-            start,
-            request.target_distance_m,
-            request.count,
-        )
-    except RouteNotFoundError as exc:
-        raise HTTPException(
-            status_code=422,
-            detail=str(exc),
-        ) from exc
-    except RoutingProviderError as exc:
-        raise HTTPException(
-            status_code=502,
-            detail=str(exc),
-        ) from exc
 
 
 def _local_response(
@@ -439,10 +402,6 @@ def _build_local_responses(
 def get_routes_with_restroom(
     request: RestroomRouteRequest,
     response: Response,
-    provider: Annotated[
-        RoutingProvider,
-        Depends(get_routing_provider),
-    ],
     restrooms: Annotated[
         list[Restroom],
         Depends(get_eligible_restrooms),
@@ -475,6 +434,11 @@ def get_routes_with_restroom(
             )
 
     response.headers["X-Route-Engine"] = "ors"
+
+    # Only reached when ROUTING_ENGINE=ors, or the local engine raised
+    # unexpectedly above -- so ORS is never constructed on the local
+    # happy path, and ORS_API_KEY is only required here.
+    provider = get_routing_provider()
 
     start = Coordinate(
         lat=request.start_lat,

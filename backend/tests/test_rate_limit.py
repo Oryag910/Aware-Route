@@ -125,7 +125,7 @@ def test_health_endpoint_is_never_rate_limited() -> None:
         assert response.status_code == 200
 
 
-def test_routes_endpoint_returns_429_when_limiter_is_over_limit() -> None:
+def test_routes_with_restroom_endpoint_returns_429_when_limiter_is_over_limit() -> None:  # noqa: E501
     def always_over_limit() -> None:
         raise HTTPException(
             status_code=429,
@@ -137,12 +137,14 @@ def test_routes_endpoint_returns_429_when_limiter_is_over_limit() -> None:
     )
 
     response = client.post(
-        "/routes",
+        "/routes/with-restroom",
         json={
             "start_lat": 40.70,
             "start_lon": -74.00,
             "target_distance_m": 2220.0,
-            "count": 1,
+            "restroom_min_mile": 0.5,
+            "restroom_max_mile": 1.0,
+            "elevation_preference": "flat",
         },
     )
 

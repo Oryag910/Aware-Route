@@ -4,12 +4,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from app.flow.interruptions import InterruptionStore
-from app.main import (
-    app,
-    get_eligible_restrooms,
-    get_interruption_store,
-    get_routing_provider,
-)
+from app.main import app, get_eligible_restrooms, get_interruption_store
 from app.rate_limit import rate_limit_dependency
 from app.restrooms.models import Restroom
 from app.routing.provider import (
@@ -172,14 +167,16 @@ def make_restroom() -> Restroom:
     )
 
 
-def test_routes_with_restroom_success() -> None:
+def test_routes_with_restroom_success(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     candidate = make_candidate()
     restroom = make_restroom()
 
     fake_provider = FakeRoutingProvider(candidate)
 
-    app.dependency_overrides[get_routing_provider] = (
-        lambda: fake_provider
+    monkeypatch.setattr(
+        "app.main.get_routing_provider", lambda: fake_provider
     )
     app.dependency_overrides[get_eligible_restrooms] = (
         lambda: [restroom]
@@ -310,7 +307,9 @@ def test_routes_with_restroom_success() -> None:
     )
 
 
-def test_routes_with_restroom_run_time_outside_hours_returns_422() -> None:
+def test_routes_with_restroom_run_time_outside_hours_returns_422(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     # The only restroom has hours 8:00 AM - 8:00 PM; a run_time of
     # 11 PM excludes it before candidate generation even runs, so no
     # candidate can match anything -- 422, not a silently empty match.
@@ -319,8 +318,8 @@ def test_routes_with_restroom_run_time_outside_hours_returns_422() -> None:
 
     fake_provider = FakeRoutingProvider(candidate)
 
-    app.dependency_overrides[get_routing_provider] = (
-        lambda: fake_provider
+    monkeypatch.setattr(
+        "app.main.get_routing_provider", lambda: fake_provider
     )
     app.dependency_overrides[get_eligible_restrooms] = (
         lambda: [restroom]
@@ -348,14 +347,16 @@ def test_routes_with_restroom_run_time_outside_hours_returns_422() -> None:
     }
 
 
-def test_routes_with_restroom_run_time_inside_hours_returns_200() -> None:  # noqa: E501
+def test_routes_with_restroom_run_time_inside_hours_returns_200(  # noqa: E501
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     candidate = make_candidate()
     restroom = make_restroom()
 
     fake_provider = FakeRoutingProvider(candidate)
 
-    app.dependency_overrides[get_routing_provider] = (
-        lambda: fake_provider
+    monkeypatch.setattr(
+        "app.main.get_routing_provider", lambda: fake_provider
     )
     app.dependency_overrides[get_eligible_restrooms] = (
         lambda: [restroom]
@@ -383,12 +384,14 @@ def test_routes_with_restroom_run_time_inside_hours_returns_200() -> None:  # no
     assert body[0]["matched"] is True
 
 
-def test_routes_with_restroom_returns_422_when_no_match() -> None:
+def test_routes_with_restroom_returns_422_when_no_match(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     candidate = make_candidate()
     fake_provider = FakeRoutingProvider(candidate)
 
-    app.dependency_overrides[get_routing_provider] = (
-        lambda: fake_provider
+    monkeypatch.setattr(
+        "app.main.get_routing_provider", lambda: fake_provider
     )
     app.dependency_overrides[get_eligible_restrooms] = lambda: []
 
@@ -413,7 +416,9 @@ def test_routes_with_restroom_returns_422_when_no_match() -> None:
     }
 
 
-def test_routes_with_restroom_backfills_with_fallback_when_understocked() -> None:  # noqa: E501
+def test_routes_with_restroom_backfills_with_fallback_when_understocked(  # noqa: E501
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     matched_candidate = make_candidate()
     fallback_candidate = make_far_candidate()
 
@@ -442,8 +447,8 @@ def test_routes_with_restroom_backfills_with_fallback_when_understocked() -> Non
         other_seed_candidate=fallback_candidate,
     )
 
-    app.dependency_overrides[get_routing_provider] = (
-        lambda: fake_provider
+    monkeypatch.setattr(
+        "app.main.get_routing_provider", lambda: fake_provider
     )
     app.dependency_overrides[get_eligible_restrooms] = (
         lambda: [matched_restroom, fallback_restroom]
@@ -491,7 +496,9 @@ def test_routes_with_restroom_backfills_with_fallback_when_understocked() -> Non
     assert body[0]["matched"] is True
 
 
-def test_routes_with_restroom_count_slices_after_scoring() -> None:
+def test_routes_with_restroom_count_slices_after_scoring(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     matched_candidate = make_candidate()
     fallback_candidate = make_far_candidate()
 
@@ -512,8 +519,8 @@ def test_routes_with_restroom_count_slices_after_scoring() -> None:
         other_seed_candidate=fallback_candidate,
     )
 
-    app.dependency_overrides[get_routing_provider] = (
-        lambda: fake_provider
+    monkeypatch.setattr(
+        "app.main.get_routing_provider", lambda: fake_provider
     )
     app.dependency_overrides[get_eligible_restrooms] = (
         lambda: [matched_restroom, fallback_restroom]
@@ -548,7 +555,9 @@ def test_routes_with_restroom_count_slices_after_scoring() -> None:
     assert body[0]["matched"] is True
 
 
-def test_routes_with_restroom_422_only_on_zero_restroom_match_not_hard_constraint_failure() -> None:  # noqa: E501
+def test_routes_with_restroom_422_only_on_zero_restroom_match_not_hard_constraint_failure(  # noqa: E501
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     # A candidate that fails the distance hard constraint but still has
     # an eligible restroom in range must NOT 422 -- it should come back
     # as a matched=False fallback result instead.
@@ -566,8 +575,8 @@ def test_routes_with_restroom_422_only_on_zero_restroom_match_not_hard_constrain
 
     fake_provider = FakeRoutingProvider(fallback_candidate)
 
-    app.dependency_overrides[get_routing_provider] = (
-        lambda: fake_provider
+    monkeypatch.setattr(
+        "app.main.get_routing_provider", lambda: fake_provider
     )
     app.dependency_overrides[get_eligible_restrooms] = (
         lambda: [fallback_restroom]
@@ -624,7 +633,9 @@ class BlindVsRestroomFirstProvider:
         return self.restroom_first_candidate
 
 
-def test_restroom_first_generation_fixes_mile_range_error_blind_candidates_miss() -> None:  # noqa: E501
+def test_restroom_first_generation_fixes_mile_range_error_blind_candidates_miss(  # noqa: E501
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     # Same shape/distance (2220.0m, matches target) as the other blind
     # candidates in this file, but shifted west (-74.10) so its
     # geometry never comes within RESTROOM_PROXIMITY_THRESHOLD_M of
@@ -661,7 +672,7 @@ def test_restroom_first_generation_fixes_mile_range_error_blind_candidates_miss(
         restroom_first_candidate=restroom_first_candidate,
     )
 
-    app.dependency_overrides[get_routing_provider] = lambda: provider
+    monkeypatch.setattr("app.main.get_routing_provider", lambda: provider)
     app.dependency_overrides[get_eligible_restrooms] = (
         lambda: [good_restroom, bad_restroom]
     )
@@ -707,14 +718,16 @@ def test_restroom_first_generation_fixes_mile_range_error_blind_candidates_miss(
         assert route["mile_range_error_m"] > 500.0
 
 
-def test_routes_with_restroom_accepts_workout_type() -> None:
+def test_routes_with_restroom_accepts_workout_type(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     candidate = make_candidate()
     restroom = make_restroom()
 
     fake_provider = FakeRoutingProvider(candidate)
 
-    app.dependency_overrides[get_routing_provider] = (
-        lambda: fake_provider
+    monkeypatch.setattr(
+        "app.main.get_routing_provider", lambda: fake_provider
     )
     app.dependency_overrides[get_eligible_restrooms] = (
         lambda: [restroom]
@@ -739,7 +752,9 @@ def test_routes_with_restroom_accepts_workout_type() -> None:
     assert len(response.json()) == 1
 
 
-def test_pathological_blind_candidates_are_dropped() -> None:
+def test_pathological_blind_candidates_are_dropped(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     matched_candidate = make_candidate()
     # 30km for a 2.22km ask -- the kind of degenerate loop ORS
     # round_trip occasionally returns. Same geometry as the matched
@@ -756,8 +771,8 @@ def test_pathological_blind_candidates_are_dropped() -> None:
         other_seed_candidate=pathological,
     )
 
-    app.dependency_overrides[get_routing_provider] = (
-        lambda: fake_provider
+    monkeypatch.setattr(
+        "app.main.get_routing_provider", lambda: fake_provider
     )
     app.dependency_overrides[get_eligible_restrooms] = (
         lambda: [restroom]
