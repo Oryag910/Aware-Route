@@ -3,7 +3,7 @@ uvicorn[standard]
 supabase
 python-dotenv
 pytest
-ruff
+ruff==0.15.21
 mypy
 osmnx==2.1.0
 scikit-learn==1.9.0

@@ -8,8 +8,20 @@ strict = true
 # OSMnx and NetworkX ship no type information; without skipping their
 # imports, mypy crawls their (huge) dependency trees and times out.
 # Treat them as untyped at the boundary -- our own graph code stays
-# strict, these libraries return Any.
+# strict, these libraries return Any. srtm is an optional dependency
+# (elevation enrichment in scripts/build_graph.py degrades gracefully
+# when it's absent), so it also needs ignore_missing_imports to cover
+# both "not installed" and "installed but untyped".
 [[tool.mypy.overrides]]
-module = ["osmnx.*", "osmnx", "networkx.*", "networkx", "shapely.*", "shapely"]
+module = [
+    "osmnx.*",
+    "osmnx",
+    "networkx.*",
+    "networkx",
+    "shapely.*",
+    "shapely",
+    "srtm",
+    "srtm.*",
+]
 follow_imports = "skip"
 ignore_missing_imports = true
