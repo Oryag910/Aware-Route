@@ -71,7 +71,7 @@ def attach_elevations(graph: Any) -> bool:
     build blocker.
     """
     try:
-        import srtm  # type: ignore[import-untyped]
+        import srtm
     except ImportError:
         print("Elevation: 'srtm' package not installed -- skipping elevation.")
         return False
