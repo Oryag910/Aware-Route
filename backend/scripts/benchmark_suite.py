@@ -627,7 +627,9 @@ def build_report(results: list[ScenarioResult]) -> str:
         f"{'PASS' if p95_latency < 2.0 else 'FAIL'}"
     )
     lines.append(
-        f"- 100% of within-+/-100m routes also pass hard constraints: "
+        f"- Scenarios with >=1 within-tolerance route satisfying "
+        f"applicable hard constraints (of scenarios with >=1 route "
+        f"within +/-100m): "
         f"**{within_and_constraints_pct:.1f}%** "
         f"{'PASS' if within_and_constraints_pct >= 99.999 else 'FAIL'}"
     )
