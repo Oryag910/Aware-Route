@@ -1,77 +1,78 @@
-# Aware Running Route Planner
+# Aware
 
-A running-route planning tool that generates routes based on a runner’s starting location, target distance, elevation preference, and desired restroom access.
+A Manhattan running/walking route planner with a custom local routing engine — routes are generated to hit a target distance, pass a restroom in a requested mile range (falling back to a water fountain when no restroom match is available), and match a shape and elevation preference, then ranked and returned with GPX export.
 
-## Why This Project Exists
+<!-- TODO: add product demo GIF -->
 
-Planning a long run often requires more than choosing a starting point and distance. Runners may also need to consider where public restrooms are located, whether those restrooms are expected to be available, and at what point during the run they will be reached.
+Runners planning longer routes often have to manually cross-reference maps, restroom locations, and distance estimates. Aware treats restroom access as a routing constraint instead of a map overlay, generating routes that are built around it from the start.
 
-Existing mapping tools may display public restrooms or generate running routes, but restroom access usually does not influence how the route itself is created. Runners therefore have to manually compare maps, adjust routes, and estimate where restroom stops will fall during the run.
+<!-- TODO: add live demo URL once verified -->
+GitHub: [Oryag910/Aware-Route](https://github.com/Oryag910/Aware-Route)
 
-This project aims to make that process easier by treating restroom access as a route-planning requirement rather than simply displaying restrooms as map markers.
+## What it does
 
-## Core Concept
+- Target running/walking distance, tuned toward the requested value
+- Requested restroom mile range (e.g. "a restroom between mile 4 and 6")
+- Route shape: round trip, out-and-back, or mixed
+- Elevation preference: flat, moderate, hilly, or any
+- Ranked route alternatives, not just a single result
+- Restroom or water-fountain info attached to each route, with distinct map markers
+- GPX export for use in other running/GPS apps
 
-A runner will eventually be able to provide:
+## How it works
 
-* A starting location
-* An approximate target distance
-* A preferred restroom mile range
-* An elevation preference
+```mermaid
+graph TD
+    A[React + Leaflet frontend] --> B["FastAPI /routes/with-restroom"]
+    B --> C[Supabase restroom data]
+    B --> D[Committed Manhattan OSM walk graph]
+    D --> E[OSMnx + NetworkX routing]
+    E --> F["Candidate generation<br/>round / out-and-back / amenity-first"]
+    F --> G[Constraint + quality evaluation]
+    G --> H[Scoring, diversity, ranking]
+    H --> I[Ranked routes → map + GPX]
+    B -.fallback only.-> J[OpenRouteService]
+```
 
-The application will use those preferences to generate and rank running routes that pass an eligible public restroom at a useful point during the run.
+The local engine (OSMnx + NetworkX against a committed graph artifact) is the production-primary path. OpenRouteService is wired in as fallback infrastructure — used only if the local graph fails to load or a request hits an unexpected local-engine error — not part of the normal request path.
 
-For example:
+## Routing engine
 
-> Generate an approximately 10-mile loop starting near Columbia University, with a public restroom between miles 4 and 6 and a preference for a flatter route.
+This is the core of the project, not a wrapper around a third-party directions API.
 
-## Initial Scope
+- A Manhattan pedestrian walk graph is built from OpenStreetMap data via OSMnx and committed as a graph artifact, so the app loads it once at startup instead of fetching/building a graph per request.
+- Shortest-path and distance computations run on that graph with NetworkX (Dijkstra-based).
+- Custom generators produce round-trip, out-and-back, and amenity-first (routed through a restroom/fountain) candidates.
+- A length-tuning pass drives candidates toward the requested target distance.
+- Candidates are evaluated against the requested restroom mile range and elevation preference, then ranked using shape fit, pedestrian-path share, signal interruptions, elevation, retracing, amenity proximity, and route similarity.
+- Quality guards reject severely retraced candidates that would violate the requested route shape (e.g. a "round" request degenerating into a near out-and-back).
+- Final candidates are deduplicated and similarity-penalized to reduce near-duplicate alternatives.
 
-The initial version will support:
+## Validation
 
-* Running routes only
-* New York City only
-* Manhattan as the first supported area
-* Approximate route distances rather than guaranteed exact distances
-* Officially listed public restrooms
-* Elevation as a route-ranking preference
-* Restroom availability information based on available public data
+The backend ships with a deterministic local-engine benchmark; the full report is checked into the repo at [`backend/benchmarks/local/report_20260819_132346.md`](backend/benchmarks/local/report_20260819_132346.md).
 
-The initial target users are urban runners planning longer routes who want predictable restroom options during their run.
+| Metric | Result |
+|---|---|
+| Scenarios with ≥1 route within ±100 m of target | **537 / 537** |
+| Generated candidates inspected | **2,519** |
+| Disconnected candidates | **0** |
+| Median local route generation time | **~0.25 s** |
+| p95 local route generation time | **~1.29 s** |
+| Max local route generation time | **~2.60 s** |
+| Offline bundled-fountain placement checks | **268 / 268** |
 
-## Non-Goals
+The 537/537 figure is scenario-level success (at least one qualifying route per scenario), not a claim that every one of the 2,519 generated candidates individually landed within ±100 m. The fountain-placement figure validates against the offline bundled fountain dataset, not live Supabase restroom data — see the report for the full defect-rate and diversity breakdown.
 
-The initial version will not provide:
+## Tech stack
 
-* Live turn-by-turn navigation
-* Live run tracking
-* Guaranteed real-time restroom availability
-* Cycling routes
-* Nationwide route coverage
-* Weather or shade-based routing
-* Water-fountain planning
-* Garmin, Strava, or smartwatch integrations
-* Social profiles, route sharing, or follower features
+**Backend:** Python, FastAPI, OSMnx, NetworkX, Supabase, pytest, Ruff, mypy (strict)
 
-These features may be considered later, but only after the core restroom-aware route-generation experience works reliably.
+**Frontend:** React 19, TypeScript, Vite, Leaflet / react-leaflet, Tailwind CSS
 
-## Important Limitation
+**Infrastructure:** Render (backend), Vercel (frontend), GitHub Actions CI, OpenRouteService (fallback only)
 
-Public-restroom information may be incomplete, outdated, or temporarily inaccurate. The application will not guarantee that a restroom is open or accessible.
-
-Instead, it will communicate the available information and level of confidence associated with each restroom.
-
-## Project Status
-
-This project is currently in the planning and feasibility-validation stage. No production application has been built yet.
-
-The initial work will focus on validating:
-
-* Whether available public-restroom data is reliable enough
-* Whether useful running loops can be generated around restroom constraints
-* Whether runners consider this a meaningful and recurring problem
-
-## Development Setup
+## Local development
 
 ### Backend
 
@@ -83,11 +84,14 @@ pip install -r requirements.txt
 uvicorn app.main:app --reload --reload-dir app
 ```
 
-Backend health check:
+Health check: `http://localhost:8000/health`
 
-```text
-http://localhost:8000/health
-```
+Environment variables (`backend/.env`):
+
+- `SUPABASE_URL`, `SUPABASE_KEY` — required for restroom data
+- `ROUTING_ENGINE=local` — runs the local OSMnx/NetworkX engine (production default); unset or `ors` uses the OpenRouteService pipeline instead
+- `ORS_API_KEY` — only required when `ROUTING_ENGINE=ors`, or to keep the local engine's fallback path functional
+- `ALLOWED_ORIGINS` — comma-separated CORS origins; unset means no CORS headers (fine for local dev via the Vite proxy)
 
 ### Frontend
 
@@ -97,69 +101,26 @@ npm install
 npm run dev
 ```
 
-Frontend:
+Runs at `http://localhost:5173`, proxying `/api/*` to the local backend in dev.
 
-```text
-http://localhost:5173
-```
+## Testing & CI
+
+GitHub Actions runs on every PR and push to `main`:
+
+- Backend: `pytest`, `ruff check`, `mypy` (strict)
+- Frontend: `eslint`, production `vite build`
 
 ## Deployment
 
-### Render (Backend)
+- **Frontend** is deployed on Vercel from `frontend/`, with `VITE_API_URL` pointed at the backend.
+- **Backend** is deployed on Render via `render.yaml` (Docker), with `ROUTING_ENGINE=local` set so the local engine is the production path; `ORS_API_KEY` remains configured for fallback.
+- `ALLOWED_ORIGINS` on the backend must include the deployed frontend origin for CORS to work.
+- The public demo is rate-limited (per-IP and global) to keep it usable at low cost.
 
-Deploy the FastAPI backend to [Render](https://render.com):
+## Limitations
 
-1. **From the repo blueprint**: Push this repo to GitHub. In Render, select "New" > "Blueprint" and point to your repository. Render will auto-detect the `render.yaml` at the repo root and deploy the backend service with the correct Docker build settings.
-
-2. **Alternatively, manual setup**: Create a new Web Service on Render, connect your repository, and configure:
-   - **Docker**: Build command uses `./backend/Dockerfile` with build context `./backend`
-   - **Port**: Render injects the `PORT` env var; the Dockerfile binds uvicorn to it automatically
-   - **Health check**: `/health` endpoint
-
-Either way, set these environment variables in Render:
-
-- `ORS_API_KEY`: Your OpenRouteService API key (required; get a free tier key at [openrouteservice.org](https://openrouteservice.org))
-- `SUPABASE_URL`: Supabase project URL (required for restroom data)
-- `SUPABASE_KEY`: Supabase anonymous key (required)
-- `ALLOWED_ORIGINS`: Comma-separated list of frontend origins (e.g., `https://your-frontend.vercel.app`). If unset, no CORS headers are sent.
-
-**Note**: Render's free tier spins down inactive services after 15 minutes. The first request after idle will be slow (cold start).
-
-### Vercel (Frontend)
-
-Deploy the React/Vite frontend to [Vercel](https://vercel.com):
-
-1. Import your repository into Vercel
-2. Configure the build:
-   - **Root Directory**: `frontend`
-   - **Build Command**: `npm run build` (default is fine)
-   - **Output Directory**: `dist` (default)
-3. Set the environment variable:
-   - `VITE_API_URL`: The Render backend URL, e.g., `https://your-app.onrender.com` (no trailing slash; the `/api` prefix is not used in production)
-4. Deploy and redeploy after setting `VITE_API_URL` (Vercel needs to rebuild with the variable set)
-
-The `vercel.json` in `frontend/` configures SPA routing: all requests are rewritten to `index.html`.
-
-### CORS Configuration
-
-Cross-origin requests (from the frontend to the backend) are only allowed when `ALLOWED_ORIGINS` is set on the Render service. Set it to your Vercel frontend URL:
-
-```
-https://your-frontend.vercel.app
-```
-
-During local development, the Vite dev server proxies `/api/*` requests to `http://localhost:8000` (stripping the `/api` prefix), so CORS is not needed.
-
-### Demo Rate Limits
-
-The backend enforces two demo-tier rate limits:
-
-- **Per-IP**: 10 requests/hour (sliding window)
-- **Global**: 90 requests/day (sliding window)
-
-**Why these limits**: Each route request costs up to 20 OpenRouteService API calls. The ORS free tier allows 2000 calls/day, so 90 requests/day uses at most 1800 calls, leaving headroom. The per-IP limit prevents single clients from exhausting the daily quota.
-
-The rate limiter is in-memory and single-instance; it resets when the Render service restarts. At scale, you would replace it with a persistent store (e.g., Redis).
-
-Clients hitting the rate limit receive a 429 response with the message: "Demo request limit reached — try again later."
-
+- Currently scoped to Manhattan only.
+- Public restroom data can be incomplete, outdated, or wrong about hours/availability.
+- Routes are distance-tuned within a tolerance, not guaranteed-exact.
+- No live turn-by-turn navigation or run tracking.
+- The benchmark validates graph-network routing correctness and offline fountain placement; it does not independently verify every crossing, ferry, or water-adjacency condition beyond what the committed walk graph encodes.
