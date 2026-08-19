@@ -4,22 +4,27 @@ Runs every scenario in `scripts/benchmark_scenarios.py` against the REAL
 Manhattan graph via `app.generation.engine.generate_candidates` /
 `generate_amenity_aware`, measuring:
   - distance error vs target
-  - amenity-in-range pass (a fountain node actually appears on the
-    returned geometry, same check as scripts/benchmark_amenities.py)
+  - offline fountain-placement pass (a bundled fountain node in the
+    requested range actually appears on the returned geometry, same
+    check as scripts/benchmark_amenities.py) -- this exercises the
+    bundled fountain dataset only, not live Supabase restroom
+    availability or the /routes/with-restroom restroom-match contract;
+    those are covered by endpoint tests
   - latency
   - defect signals: excessive turns (sharp/U-turn counts from
     app.flow.shape), repeated-segment ratio (app.restrooms.repeated_segments),
-    tiny corrective-loop detection, and connectivity/validity (dedup'd
+    short start-return spur detection (a length-tuner-prepended
+    out-and-back spur at the route start, distinct from a normal
+    out_and_back route's turnaround), and connectivity/validity (dedup'd
     node path length vs geometry point count, is the geometry a single
-    connected walk with no huge jumps).
+    connected walk with no huge jumps)
+  - route-edge diversity: undirected edge-set overlap between a
+    scenario's candidate alternatives
 
-River/ferry/highway crossings are structurally impossible on this walk
-graph -- OSMnx's `network_type="walk"` extraction excludes motorways,
-`route=ferry`, and water at the data layer, so there is no edge a
-generated path could use to cross open water or a highway. That is a
-guarantee of the graph construction, not something this suite tests for
-(there's no valid edge to trigger it, so a "crossing" defect is
-unreachable by construction).
+Graph-network constraint: routes are generated exclusively on the
+committed OSMnx walk graph. This benchmark does not separately test for
+ferry, motorway, or water-crossing defects; generated routes can only
+use edges present in the walk-network artifact.
 
 Writes a markdown report to benchmarks/local/report_<timestamp>.md and
 exports ~30 representative routes as GeoJSON to benchmarks/local/ for
@@ -63,13 +68,67 @@ MAX_REASONABLE_SHARP_TURNS_PER_MILE = 8.0
 MAX_REASONABLE_U_TURNS = 2
 MAX_REASONABLE_REPEATED_SEGMENT_RATIO = 0.15
 
-# A "tiny corrective loop" is a short closed sub-path (the route touches
-# the same grid cell twice within a small number of points AND a small
-# on-the-ground distance) used to pad length rather than a genuine
-# route feature -- distinct from the coarser repeated_segment_ratio
-# because it specifically looks for *short* revisits.
-TINY_LOOP_MAX_INDEX_GAP = 30
-TINY_LOOP_MAX_M = 250.0
+# A "short start-return spur" is the specific artifact
+# app.generation.length_tune._spur_path introduces: when a candidate
+# undershoots its target length, the tuner splices `spur +
+# reversed(spur)` onto the FRONT of the route --
+# `tuned_path = spur + node_path[1:]` -- so a genuine corrective spur
+# always starts at the route's first geometry point and returns to the
+# exact same graph node (bit-identical coordinate) a short distance
+# later. This is deliberately narrower than "any short closed sub-path
+# anywhere in the route": an earlier version of this detector scanned
+# arbitrary (i, j) pairs and, on real Manhattan out_and_back routes,
+# flagged ~96.6% of candidates -- but out_and_back routes are
+# *constructed* as start -> turnaround -> reverse(outbound) -> start
+# (app.generation.out_and_back.out_and_back_path), so any point within
+# ~20-125m of the turnaround has a near-identical mirror point on the
+# return leg a short traveled-distance away. That's the intended route
+# shape, not a tuning artifact, and the old arbitrary-pair scan couldn't
+# tell the two apart. Anchoring the scan at index 0 only (never scanning
+# from the turnaround or any other interior point) targets exactly the
+# tuner's prepended spur and nothing else.
+#
+# Measured as physical distance, not point-index gap: geometry points
+# come from per-edge OSMnx polylines (app.graph.model.path_to_geometry),
+# so point density varies with how curvy a street's geometry is -- a
+# fixed index window conflates "many points" with "far apart".
+#
+# SHORT_SPUR_MIN_PATH_M: below this, two nearby points are just dense
+# sampling along a curved OSM way (or adjacent-point noise), not a
+# genuine out-and-back spur -- there's no real sub-path to speak of.
+# SHORT_SPUR_MAX_PATH_M: keeps the documented ~250m "tiny" intent -- a
+# spur this size or smaller is short relative to typical multi-mile
+# routes; a longer return-to-start is a full out_and_back route, not a
+# tuning artifact.
+# SHORT_SPUR_START_REVISIT_RADIUS_M: how close a later point must land
+# to geometry[0] to count as "the spur returned". Grounded in a full
+# 537-scenario/2521-candidate run of this benchmark: candidates that
+# genuinely contain a tuner-prepended spur return to *exactly* the start
+# node (haversine == 0.0, since `_spur_path`'s out-and-back ends on the
+# same graph node the route starts from, and both render via the same
+# `node_coordinate` call) -- 163/2521 candidates landed in a tight
+# [0, 0.001)m bucket. The next-closest naturally-occurring near-approach
+# in that same run (ordinary street geometry happening to pass near the
+# start without any spur) was ~13-14m, clustered around one specific
+# scenario's local street layout. 1m sits cleanly in the gap between
+# "exact spur return" and "coincidental nearby street", with generous
+# margin on both sides.
+SHORT_SPUR_MIN_PATH_M = 40.0
+SHORT_SPUR_MAX_PATH_M = 250.0
+SHORT_SPUR_START_REVISIT_RADIUS_M = 1.0
+
+# Undirected route-edge overlap (Jaccard index over undirected edge
+# sets, see `_route_edge_signature` / `_edge_overlap`) between two
+# candidates in the same scenario. Coordinates are rounded to 6 decimal
+# places (~0.11m at NYC's latitude) before forming edges -- candidates
+# come from committed graph-node coordinates, so this collapses
+# floating-point noise without merging distinct intersections.
+EDGE_COORD_PRECISION = 6
+
+# Reporting threshold (not a routing/scoring constant): a candidate pair
+# at/below this overlap is considered a "meaningfully distinct"
+# alternative for the purposes of the benchmark report.
+DISTINCT_ALTERNATIVE_MAX_OVERLAP = 0.80
 
 GEOJSON_SAMPLE_COUNT = 30
 
@@ -81,7 +140,7 @@ class DefectFlags:
     excessive_sharp_turns: bool
     excessive_u_turns: bool
     excessive_repeated_segments: bool
-    tiny_corrective_loop: bool
+    short_start_return_spur: bool
     disconnected: bool
 
     @property
@@ -90,7 +149,7 @@ class DefectFlags:
             self.excessive_sharp_turns
             or self.excessive_u_turns
             or self.excessive_repeated_segments
-            or self.tiny_corrective_loop
+            or self.short_start_return_spur
             or self.disconnected
         )
 
@@ -114,6 +173,9 @@ class ScenarioResult:
     error: str | None
     time_s: float
     candidates: list[CandidateReport] = field(default_factory=list)
+    # Pairwise undirected route-edge overlap for every candidate pair in
+    # this scenario (empty when fewer than 2 candidates).
+    edge_overlaps: tuple[float, ...] = ()
 
     @property
     def best_error_m(self) -> float | None:
@@ -139,28 +201,103 @@ class ScenarioResult:
             return True
         return any(c.passes_amenity for c in within)
 
+    @property
+    def has_distinct_alternative(self) -> bool:
+        """True if at least one candidate pair has edge overlap at/below
+        DISTINCT_ALTERNATIVE_MAX_OVERLAP -- see that constant's docstring
+        for what "distinct" means here."""
+        return any(
+            overlap <= DISTINCT_ALTERNATIVE_MAX_OVERLAP for overlap in self.edge_overlaps
+        )
 
-def _tiny_corrective_loop(geometry: tuple[Any, ...]) -> bool:
-    """Detects a short closed sub-path: two points close in *index*
-    (within TINY_LOOP_MAX_INDEX_GAP) whose on-the-ground revisit
-    distance is small (within TINY_LOOP_MAX_M) -- a hallmark of the
-    length-tuner bolting on a tiny loop instead of a clean spur/trim."""
+
+def _short_start_return_spur(geometry: tuple[Any, ...]) -> bool:
+    """Detects a short out-and-back spur PREPENDED AT THE ROUTE START:
+    the cumulative along-route distance traveled from geometry[0] to
+    some later point j falls within [SHORT_SPUR_MIN_PATH_M,
+    SHORT_SPUR_MAX_PATH_M] AND that point lands within
+    SHORT_SPUR_START_REVISIT_RADIUS_M of geometry[0] -- i.e. the route
+    left its start, went somewhere short, and came back, before
+    continuing on. This mirrors exactly what
+    app.generation.length_tune._spur_path splices onto the front of an
+    undershooting candidate. See the module-level constants for why this
+    only anchors at index 0 rather than scanning arbitrary (i, j) pairs.
+
+    Physical-distance based, not point-index based -- geometry point
+    density varies with per-edge OSMnx polyline curvature, so index gap
+    alone doesn't measure on-the-ground spur size (see constants)."""
     from app.routing.geometry import haversine_m
 
     n = len(geometry)
-    if n < 6:
+    if n < 2:
         return False
 
     coords = [Coordinate(lat=p.lat, lon=p.lon) for p in geometry]
+    start = coords[0]
 
-    # Compare each point to points within the index window ahead of it;
-    # O(n * window) which is fine at route-geometry sizes (~hundreds).
-    for i in range(n):
-        for j in range(i + 4, min(i + TINY_LOOP_MAX_INDEX_GAP, n)):
-            if haversine_m(coords[i], coords[j]) <= (TINY_LOOP_MAX_M / 20.0):
-                return True
+    traveled_m = 0.0
+    for j in range(1, n):
+        traveled_m += haversine_m(coords[j - 1], coords[j])
+        if traveled_m > SHORT_SPUR_MAX_PATH_M:
+            break  # cumulative distance only grows -- no j beyond here can qualify
+        if traveled_m < SHORT_SPUR_MIN_PATH_M:
+            continue
+        if haversine_m(start, coords[j]) <= SHORT_SPUR_START_REVISIT_RADIUS_M:
+            return True
 
     return False
+
+
+EdgeSignature = frozenset[tuple[tuple[float, float], tuple[float, float]]]
+
+
+def _route_edge_signature(geometry: tuple[Any, ...]) -> EdgeSignature:
+    """Undirected set of edges implied by a route's geometry polyline.
+
+    Each consecutive geometry pair becomes an edge, keyed by its
+    endpoints rounded to EDGE_COORD_PRECISION decimals. Edges are stored
+    as a sorted (min, max) tuple so A->B and B->A -- the same physical
+    street segment walked in either direction -- collapse to one edge.
+    Zero-length pairs (duplicate consecutive points, which can occur at
+    route joins/spurs) are skipped since they carry no positional
+    information and would otherwise inflate the "shared edges" count for
+    two otherwise-different routes."""
+    edges: set[tuple[tuple[float, float], tuple[float, float]]] = set()
+
+    for a, b in zip(geometry, geometry[1:]):
+        point_a = (round(a.lat, EDGE_COORD_PRECISION), round(a.lon, EDGE_COORD_PRECISION))
+        point_b = (round(b.lat, EDGE_COORD_PRECISION), round(b.lon, EDGE_COORD_PRECISION))
+        if point_a == point_b:
+            continue
+        edge = (point_a, point_b) if point_a <= point_b else (point_b, point_a)
+        edges.add(edge)
+
+    return frozenset(edges)
+
+
+def _edge_overlap(edges_a: EdgeSignature, edges_b: EdgeSignature) -> float:
+    """Undirected route-edge overlap: |A ∩ B| / |A ∪ B| (Jaccard index)
+    over two routes' edge sets. 0.0 = no shared street edges, 1.0 =
+    identical edge set (including the same route walked in reverse,
+    since edges are undirected)."""
+    union = edges_a | edges_b
+    if not union:
+        return 0.0
+    return len(edges_a & edges_b) / len(union)
+
+
+def _pairwise_edge_overlaps(candidates: list[RouteCandidate]) -> tuple[float, ...]:
+    """Pairwise undirected route-edge overlap for every candidate pair
+    in a scenario's result set (empty if fewer than 2 candidates)."""
+    if len(candidates) < 2:
+        return ()
+
+    signatures = [_route_edge_signature(c.geometry) for c in candidates]
+    return tuple(
+        _edge_overlap(signatures[i], signatures[j])
+        for i in range(len(signatures))
+        for j in range(i + 1, len(signatures))
+    )
 
 
 def _connectivity_ok(candidate: RouteCandidate) -> bool:
@@ -221,7 +358,7 @@ def _build_candidate_report(
         excessive_sharp_turns=sharp_turn_rate > MAX_REASONABLE_SHARP_TURNS_PER_MILE,
         excessive_u_turns=u_turns > MAX_REASONABLE_U_TURNS,
         excessive_repeated_segments=repeated_ratio > MAX_REASONABLE_REPEATED_SEGMENT_RATIO,
-        tiny_corrective_loop=_tiny_corrective_loop(candidate.geometry),
+        short_start_return_spur=_short_start_return_spur(candidate.geometry),
         disconnected=not _connectivity_ok(candidate),
     )
 
@@ -302,6 +439,7 @@ def run_scenario(
             error=None,
             time_s=elapsed,
             candidates=reports,
+            edge_overlaps=_pairwise_edge_overlaps(candidates),
         ),
         candidates,
     )
@@ -315,15 +453,53 @@ def _percentile(values: list[float], pct: float) -> float:
     return sorted_values[index]
 
 
-def _alternatives_differ(scenario_result: ScenarioResult) -> bool:
-    """True if the candidate set has meaningfully different distances
-    (not all near-identical) -- a cheap proxy for "are alternatives
-    actually different routes"."""
-    distances = [c.distance_m for c in scenario_result.candidates]
-    if len(distances) < 2:
-        return True
-    spread = max(distances) - min(distances)
-    return spread > 10.0  # meters -- near-zero spread means near-duplicate paths
+REPORT_SHAPES: tuple[str, ...] = ("round", "out_and_back", "mix")
+
+
+@dataclass(frozen=True)
+class ShapeQuality:
+    shape: str
+    candidate_count: int
+    excessive_repeated_segments_pct: float
+    short_start_return_spur_pct: float
+    scenarios_with_alternatives: int
+    median_edge_overlap: float | None
+    distinct_alternative_pct: float | None
+    distinct_alternative_count: int
+
+
+def _shape_quality(ok_results: list[ScenarioResult], shape: str) -> ShapeQuality:
+    bucket = [r for r in ok_results if r.scenario.shape == shape]
+    candidates = [c for r in bucket for c in r.candidates]
+    candidate_count = len(candidates)
+
+    repeated_pct = (
+        100.0 * sum(1 for c in candidates if c.defects.excessive_repeated_segments) / candidate_count
+        if candidate_count
+        else 0.0
+    )
+    spur_pct = (
+        100.0 * sum(1 for c in candidates if c.defects.short_start_return_spur) / candidate_count
+        if candidate_count
+        else 0.0
+    )
+
+    alt_bucket = [r for r in bucket if len(r.candidates) >= 2]
+    overlaps = [overlap for r in alt_bucket for overlap in r.edge_overlaps]
+    median_overlap = statistics.median(overlaps) if overlaps else None
+    distinct = [r for r in alt_bucket if r.has_distinct_alternative]
+    distinct_pct = 100.0 * len(distinct) / len(alt_bucket) if alt_bucket else None
+
+    return ShapeQuality(
+        shape=shape,
+        candidate_count=candidate_count,
+        excessive_repeated_segments_pct=repeated_pct,
+        short_start_return_spur_pct=spur_pct,
+        scenarios_with_alternatives=len(alt_bucket),
+        median_edge_overlap=median_overlap,
+        distinct_alternative_pct=distinct_pct,
+        distinct_alternative_count=len(distinct),
+    )
 
 
 def build_report(results: list[ScenarioResult]) -> str:
@@ -375,8 +551,8 @@ def build_report(results: list[ScenarioResult]) -> str:
         "excessive_repeated_segments": sum(
             1 for c in all_candidates if c.defects.excessive_repeated_segments
         ),
-        "tiny_corrective_loop": sum(
-            1 for c in all_candidates if c.defects.tiny_corrective_loop
+        "short_start_return_spur": sum(
+            1 for c in all_candidates if c.defects.short_start_return_spur
         ),
         "disconnected": sum(1 for c in all_candidates if c.defects.disconnected),
     }
@@ -386,11 +562,37 @@ def build_report(results: list[ScenarioResult]) -> str:
         100.0 * len(with_route) / len(feasible) if feasible else 0.0
     )
 
-    alt_differ = [r for r in ok_results if len(r.candidates) >= 2]
-    alt_differ_pass = [r for r in alt_differ if _alternatives_differ(r)]
-    alt_differ_pct = (
-        100.0 * len(alt_differ_pass) / len(alt_differ) if alt_differ else 0.0
+    alt_results = [r for r in ok_results if len(r.candidates) >= 2]
+    all_overlaps = [overlap for r in alt_results for overlap in r.edge_overlaps]
+    median_overlap = statistics.median(all_overlaps) if all_overlaps else None
+    distinct_results = [r for r in alt_results if r.has_distinct_alternative]
+    distinct_pct = (
+        100.0 * len(distinct_results) / len(alt_results) if alt_results else 0.0
     )
+    # All-pairs view: what fraction of every individual candidate pair
+    # (not just "does the scenario have >=1 such pair") is at/below the
+    # threshold -- a scenario with 5 near-duplicate candidates and one
+    # outlier pair still passes the scenario-level check above, so this
+    # gives a more honest picture of the whole candidate pool.
+    all_pairs_distinct_pct = (
+        100.0
+        * sum(1 for overlap in all_overlaps if overlap <= DISTINCT_ALTERNATIVE_MAX_OVERLAP)
+        / len(all_overlaps)
+        if all_overlaps
+        else 0.0
+    )
+    # Per-scenario median, then summarized across scenarios -- unlike
+    # the pooled median above, this weights every scenario equally
+    # instead of letting scenarios with more candidate pairs (e.g. 10
+    # pairs at count=5 vs. 1 pair at count=2) dominate.
+    per_scenario_medians = [
+        statistics.median(r.edge_overlaps) for r in alt_results if r.edge_overlaps
+    ]
+    median_of_scenario_medians = (
+        statistics.median(per_scenario_medians) if per_scenario_medians else None
+    )
+
+    shape_quality = {shape: _shape_quality(ok_results, shape) for shape in REPORT_SHAPES}
 
     lines: list[str] = []
     lines.append(f"# Local engine benchmark report — {datetime.now().isoformat(timespec='seconds')}")
@@ -420,8 +622,10 @@ def build_report(results: list[ScenarioResult]) -> str:
         f"{'PASS' if within_and_constraints_pct >= 99.999 else 'FAIL'}"
     )
     lines.append(
-        f"- Alternatives meaningfully different (scenarios w/ >=2 candidates): "
-        f"**{alt_differ_pct:.1f}%** ({len(alt_differ_pass)}/{len(alt_differ)})"
+        f"- Scenarios with a meaningfully distinct alternative (>=1 candidate "
+        f"pair with undirected route-edge overlap <= {DISTINCT_ALTERNATIVE_MAX_OVERLAP:.2f}, "
+        f"scenarios w/ >=2 candidates): "
+        f"**{distinct_pct:.1f}%** ({len(distinct_results)}/{len(alt_results)})"
     )
     lines.append("")
     lines.append("## Accuracy")
@@ -431,8 +635,16 @@ def build_report(results: list[ScenarioResult]) -> str:
         f"{len(ok_results)} ({within_tol_pct:.1f}%)"
     )
     lines.append(
-        f"- Amenity-required scenarios passing (fountain in range AND on-route): "
+        f"- Offline fountain-placement scenarios passing (fountain in "
+        f"requested range AND on generated route): "
         f"{len(amenity_pass)}/{len(amenity_scenarios)} ({amenity_pass_pct:.1f}%)"
+    )
+    lines.append("")
+    lines.append(
+        "Methodology note: this benchmark validates local generation "
+        "against the bundled fountain dataset. It does not validate live "
+        "Supabase restroom availability or the /routes/with-restroom "
+        "restroom-match contract; those are covered by endpoint tests."
     )
     lines.append("")
     lines.append("## Latency")
@@ -447,15 +659,104 @@ def build_report(results: list[ScenarioResult]) -> str:
     for defect_name, count in defect_counts.items():
         pct = 100.0 * count / total_candidates if total_candidates else 0.0
         lines.append(f"- {defect_name}: {count} ({pct:.1f}%)")
+    lines.append(
+        "  (short_start_return_spur: a short out-and-back spur PREPENDED "
+        "AT THE ROUTE START by the length tuner -- "
+        f"{SHORT_SPUR_MIN_PATH_M:.0f}-{SHORT_SPUR_MAX_PATH_M:.0f}m of "
+        f"travel from geometry[0] that returns within "
+        f"{SHORT_SPUR_START_REVISIT_RADIUS_M:.0f}m of geometry[0]. Only "
+        "scans from the route's start point, not arbitrary sub-paths, so "
+        "it does not flag a normal out_and_back route's legitimate "
+        "turnaround; see benchmark_suite._short_start_return_spur)"
+    )
     lines.append("")
     lines.append(
-        "River/ferry/highway crossings: **structurally impossible** — the "
-        "walk graph is built with OSMnx `network_type=\"walk\"`, which "
-        "excludes motorways, `route=ferry`, and water at the data layer. "
-        "There is no edge a generated path could traverse to cross open "
-        "water or a highway, so this is a guarantee of the graph "
-        "construction rather than a defect check run here."
+        "Graph-network constraint: routes are generated exclusively on the "
+        "committed OSMnx walk graph. This benchmark does not separately "
+        "test for ferry, motorway, or water-crossing defects; generated "
+        "routes can only use edges present in the walk-network artifact."
     )
+    lines.append("")
+    lines.append("## Diversity (undirected route-edge overlap)")
+    lines.append("")
+    lines.append(
+        "For scenarios with >=2 candidates: pairwise undirected route-edge "
+        "overlap (Jaccard index over each candidate's rounded-coordinate "
+        "edge set -- see `_route_edge_signature` / `_edge_overlap`). "
+        "0.0 = no shared street edges between a pair, 1.0 = identical edge "
+        "set (including the same route walked in reverse)."
+    )
+    lines.append("")
+    lines.append(
+        f"- Median pairwise edge overlap (all candidate pairs pooled): "
+        f"{f'{median_overlap:.3f}' if median_overlap is not None else 'n/a'}"
+    )
+    lines.append(
+        f"- All candidate pairs at/below {DISTINCT_ALTERNATIVE_MAX_OVERLAP:.2f} "
+        f"overlap: **{all_pairs_distinct_pct:.1f}%** "
+        f"({sum(1 for o in all_overlaps if o <= DISTINCT_ALTERNATIVE_MAX_OVERLAP)}/"
+        f"{len(all_overlaps)} pairs) -- every individual pair, not just "
+        "\"does the scenario have >=1 such pair\"; a scenario can pass "
+        "the per-scenario check below even if 4 of 5 candidates are "
+        "near-duplicates, so this is the more honest whole-pool number."
+    )
+    lines.append(
+        f"- Median of each scenario's own median pairwise overlap, "
+        f"summarized across scenarios: "
+        f"{f'{median_of_scenario_medians:.3f}' if median_of_scenario_medians is not None else 'n/a'} "
+        "-- weights every scenario equally instead of letting "
+        "scenarios with more candidate pairs dominate the pooled median "
+        "above."
+    )
+    lines.append(
+        f"- Scenarios with >=1 candidate pair at/below "
+        f"{DISTINCT_ALTERNATIVE_MAX_OVERLAP:.2f} overlap (a reporting "
+        f"threshold, not a routing/scoring constant): "
+        f"**{distinct_pct:.1f}%** ({len(distinct_results)}/{len(alt_results)})"
+    )
+    lines.append("")
+    lines.append(
+        "Out-and-back routes structurally retrace most of their own "
+        "outbound edges on the return leg by definition, so their edge "
+        "overlap is not directly comparable to round/mix routes -- see "
+        "the shape breakdown below."
+    )
+    lines.append("")
+    lines.append("## Shape-specific quality")
+    lines.append("")
+    lines.append(
+        "100% repeated-segment reuse is expected by definition for "
+        "out_and_back routes (the return leg retraces the outbound "
+        "edges); the same rate on a round route is a genuine defect "
+        "signal."
+    )
+    lines.append("")
+    lines.append(
+        "| shape | candidates | excessive_repeated_segments | "
+        "short_start_return_spur | scenarios w/ alternatives | "
+        "median edge overlap | >=1 distinct pair |"
+    )
+    lines.append("|---|---|---|---|---|---|---|")
+    for shape in REPORT_SHAPES:
+        quality = shape_quality[shape]
+        median_str = (
+            f"{quality.median_edge_overlap:.3f}"
+            if quality.median_edge_overlap is not None
+            else "n/a"
+        )
+        distinct_str = (
+            f"{quality.distinct_alternative_pct:.1f}% "
+            f"({quality.distinct_alternative_count}/{quality.scenarios_with_alternatives})"
+            if quality.distinct_alternative_pct is not None
+            else "n/a"
+        )
+        lines.append(
+            f"| {shape} | {quality.candidate_count} | "
+            f"{quality.excessive_repeated_segments_pct:.1f}% | "
+            f"{quality.short_start_return_spur_pct:.1f}% | "
+            f"{quality.scenarios_with_alternatives} | {median_str} | "
+            f"{distinct_str} |"
+        )
     lines.append("")
 
     if failed_results:
