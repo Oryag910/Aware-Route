@@ -1,6 +1,11 @@
-import { useState } from "react";
+import { useRef, useState } from "react";
 
-import { ApiError, fetchRankedRoutes, type RankedRoute } from "./api";
+import {
+  ApiError,
+  NetworkError,
+  fetchRankedRoutes,
+  type RankedRoute,
+} from "./api";
 import AwareMark from "./components/AwareMark";
 import BottomSheet, { type SheetSnap } from "./components/BottomSheet";
 import Map from "./components/Map";
@@ -23,6 +28,47 @@ const ARCHETYPE_LABELS: Record<string, string> = {
   most_scenic: "Most scenic",
 };
 
+// How long a request runs before the loading state admits the demo backend
+// may be waking up from inactivity, rather than just "still searching."
+const SLOW_LOADING_MS = 9000;
+
+type ErrorKind =
+  | "pin_missing"
+  | "no_route"
+  | "validation"
+  | "rate_limited"
+  | "restroom_unavailable"
+  | "routing_unavailable"
+  | "network"
+  | "server";
+
+type AppError = { kind: ErrorKind; detail?: string };
+
+function classifyError(caughtError: unknown): AppError {
+  if (caughtError instanceof NetworkError) {
+    return { kind: "network" };
+  }
+
+  if (caughtError instanceof ApiError) {
+    switch (caughtError.status) {
+      case 422:
+        return caughtError.isValidationError
+          ? { kind: "validation", detail: caughtError.message }
+          : { kind: "no_route" };
+      case 429:
+        return { kind: "rate_limited" };
+      case 503:
+        return { kind: "restroom_unavailable" };
+      case 502:
+        return { kind: "routing_unavailable" };
+      default:
+        return { kind: "server" };
+    }
+  }
+
+  return { kind: "server" };
+}
+
 function App() {
   const isDesktop = useMediaQuery("(min-width: 768px)");
 
@@ -34,10 +80,10 @@ function App() {
   const [selectedRouteIndex, setSelectedRouteIndex] = useState<number | null>(
     null,
   );
-  const [error, setError] = useState<string | null>(null);
-  const [noRouteFound, setNoRouteFound] = useState(false);
-  const [rateLimited, setRateLimited] = useState(false);
+  const [appError, setAppError] = useState<AppError | null>(null);
   const [isLoading, setIsLoading] = useState(false);
+  const [isSlowLoading, setIsSlowLoading] = useState(false);
+  const slowLoadingTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // Remembered inputs so results can collapse the form to a summary and the
   // error state can offer a one-click retry without re-opening the form.
@@ -47,51 +93,53 @@ function App() {
 
   async function runSearch(values: RouteFormValues) {
     if (selectedPosition === null) {
-      setError("Drop a pin on the map to set your start.");
+      setAppError({ kind: "pin_missing" });
       return;
     }
 
     setLastValues(values);
-    setError(null);
-    setNoRouteFound(false);
-    setRateLimited(false);
+    setAppError(null);
     setResults(null);
     setSelectedRouteIndex(null);
     setIsLoading(true);
+    setIsSlowLoading(false);
     setSheetSnap("half");
+
+    if (slowLoadingTimer.current !== null) {
+      clearTimeout(slowLoadingTimer.current);
+    }
+    slowLoadingTimer.current = setTimeout(() => {
+      setIsSlowLoading(true);
+    }, SLOW_LOADING_MS);
 
     try {
       const rankedRoutes = await fetchRankedRoutes(selectedPosition, values);
       setResults(rankedRoutes);
+      setSelectedRouteIndex(rankedRoutes.length > 0 ? 0 : null);
       setShowForm(false);
     } catch (caughtError) {
-      if (caughtError instanceof ApiError && caughtError.status === 422) {
-        setNoRouteFound(true);
-      } else if (
-        caughtError instanceof ApiError &&
-        caughtError.status === 429
-      ) {
-        setRateLimited(true);
-      } else if (caughtError instanceof Error) {
-        setError(caughtError.message);
-      } else {
-        setError("An unexpected error occurred.");
-      }
+      setAppError(classifyError(caughtError));
     } finally {
+      if (slowLoadingTimer.current !== null) {
+        clearTimeout(slowLoadingTimer.current);
+        slowLoadingTimer.current = null;
+      }
       setIsLoading(false);
+      setIsSlowLoading(false);
     }
   }
 
   function handleClearStart() {
+    if (isLoading) return;
     setSelectedPosition(null);
     setResults(null);
     setSelectedRouteIndex(null);
-    setNoRouteFound(false);
-    setError(null);
+    setAppError(null);
     setShowForm(true);
   }
 
   function handleSelectStart(position: [number, number]) {
+    if (isLoading) return;
     setSelectedPosition(position);
     if (!isDesktop) setSheetSnap("half");
   }
@@ -122,7 +170,8 @@ function App() {
         <button
           type="button"
           onClick={handleClearStart}
-          className="inline-flex shrink-0 items-center gap-1 rounded font-medium text-primary hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/40"
+          disabled={isLoading}
+          className="inline-flex shrink-0 items-center gap-1 rounded font-medium text-primary hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/40 disabled:cursor-not-allowed disabled:text-ink-muted disabled:no-underline"
         >
           Change
           <X className="h-3.5 w-3.5" />
@@ -162,12 +211,23 @@ function App() {
       {!showForm && formSummary}
 
       {isLoading && (
-        <StatusMessage variant="loading" heading="Scouting routes…">
-          This can take a few seconds while we check nearby restrooms.
+        <StatusMessage
+          variant="loading"
+          heading={isSlowLoading ? "Still working…" : "Building your routes…"}
+        >
+          {isSlowLoading
+            ? "The demo server may be waking up after inactivity. Your request is still running."
+            : "Finding routes that fit your distance, shape, and restroom preferences."}
         </StatusMessage>
       )}
 
-      {noRouteFound && (
+      {appError?.kind === "pin_missing" && (
+        <StatusMessage variant="info" heading="Set your start point">
+          Drop a pin on the map to set your start.
+        </StatusMessage>
+      )}
+
+      {appError?.kind === "no_route" && (
         <StatusMessage
           variant="info"
           heading="No route found in that range"
@@ -182,18 +242,75 @@ function App() {
             </>
           }
         >
-          No loop in that range passes a restroom near this start. Try a wider
-          mileage range, or drop the pin somewhere else.
+          We couldn't build a route that fits your target distance and
+          restroom range. Try a wider mileage range, or drop the pin
+          somewhere else.
         </StatusMessage>
       )}
 
-      {rateLimited && (
+      {appError?.kind === "validation" && (
+        <StatusMessage variant="info" heading="Check your inputs">
+          {appError.detail ??
+            "Some of the values you entered aren't valid. Please review and try again."}
+        </StatusMessage>
+      )}
+
+      {appError?.kind === "rate_limited" && (
         <StatusMessage variant="warning" heading="Demo limit reached">
-          This demo allows a few requests per hour. Try again later.
+          This public demo has request limits. Try again later.
         </StatusMessage>
       )}
 
-      {error !== null && (
+      {appError?.kind === "restroom_unavailable" && (
+        <StatusMessage
+          variant="danger"
+          heading="Restroom data is temporarily unavailable"
+          actions={
+            lastValues !== null ? (
+              <InlineAction onClick={() => void runSearch(lastValues)}>
+                Try again
+              </InlineAction>
+            ) : undefined
+          }
+        >
+          We couldn't load the restroom data needed to build this route. Try
+          again in a moment.
+        </StatusMessage>
+      )}
+
+      {appError?.kind === "routing_unavailable" && (
+        <StatusMessage
+          variant="danger"
+          heading="Routing service is temporarily unavailable"
+          actions={
+            lastValues !== null ? (
+              <InlineAction onClick={() => void runSearch(lastValues)}>
+                Try again
+              </InlineAction>
+            ) : undefined
+          }
+        >
+          We couldn't reach the routing service. Try again in a moment.
+        </StatusMessage>
+      )}
+
+      {appError?.kind === "network" && (
+        <StatusMessage
+          variant="danger"
+          heading="Couldn't reach the route service"
+          actions={
+            lastValues !== null ? (
+              <InlineAction onClick={() => void runSearch(lastValues)}>
+                Try again
+              </InlineAction>
+            ) : undefined
+          }
+        >
+          Check your connection and try again.
+        </StatusMessage>
+      )}
+
+      {appError?.kind === "server" && (
         <StatusMessage
           variant="danger"
           heading="Something went wrong"
@@ -205,7 +322,7 @@ function App() {
             ) : undefined
           }
         >
-          {error}
+          An unexpected error occurred. Please try again.
         </StatusMessage>
       )}
 
@@ -245,11 +362,12 @@ function App() {
             <MapPin className="h-5 w-5 text-primary" />
           </div>
           <h2 className="font-display text-lg font-semibold text-ink">
-            Click the map to set your start
+            {isDesktop ? "Click" : "Tap"} the map to set your start
           </h2>
           <p className="mt-1 text-sm text-ink-muted">
-            We'll build routes that loop back here, passing a restroom or
-            fountain in the mile range you choose.
+            We'll build routes around your target distance and requested
+            restroom range. If no restroom match is available, a water
+            fountain may appear as a fallback.
           </p>
         </div>
       </div>
@@ -306,7 +424,7 @@ function App() {
         </div>
       ) : (
         <div className="relative flex-1 overflow-hidden">
-          <div className="absolute inset-0">{mapEl}</div>
+          <div className="absolute inset-0 z-0">{mapEl}</div>
           {onboarding}
           <BottomSheet
             snap={sheetSnap}

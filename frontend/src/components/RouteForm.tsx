@@ -1,5 +1,7 @@
 import { useState, type FormEvent } from "react";
 
+import StatusMessage from "./StatusMessage";
+
 export type ElevationPreference = "flat" | "moderate" | "hilly" | "any";
 
 export type RouteShape = "round" | "out_and_back" | "mix";
@@ -33,14 +35,40 @@ export default function RouteForm({
   const [shape, setShape] = useState<RouteShape>("mix");
   const [runTime, setRunTime] = useState("");
   const [workoutType, setWorkoutType] = useState("");
+  const [formError, setFormError] = useState<string | null>(null);
 
   function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
 
+    const distance = Number(targetDistanceMiles);
+    const minMile = Number(restroomMinMile);
+    const maxMile = Number(restroomMaxMile);
+
+    if (!(distance > 0)) {
+      setFormError("Target distance must be greater than 0.");
+      return;
+    }
+
+    if (!(maxMile > 0)) {
+      setFormError("Maximum restroom mile must be greater than 0.");
+      return;
+    }
+
+    if (minMile > maxMile) {
+      setFormError("Minimum restroom mile cannot be greater than maximum mile.");
+      return;
+    }
+
+    if (maxMile > distance) {
+      setFormError("Restroom range must fall within the route distance.");
+      return;
+    }
+
+    setFormError(null);
     onSubmit({
-      targetDistanceMiles: Number(targetDistanceMiles),
-      restroomMinMile: Number(restroomMinMile),
-      restroomMaxMile: Number(restroomMaxMile),
+      targetDistanceMiles: distance,
+      restroomMinMile: minMile,
+      restroomMaxMile: maxMile,
       elevationPreference,
       shape,
       runTime,
@@ -92,8 +120,8 @@ export default function RouteForm({
           </select>
         </div>
 
-        <div className="sm:col-span-2">
-          <span className={labelClass}>Restroom mile range</span>
+        <fieldset className="sm:col-span-2 m-0 min-w-0 border-0 p-0">
+          <legend className={labelClass}>Restroom mile range</legend>
           <div className="grid grid-cols-2 gap-3">
             <div>
               <label htmlFor="restroom-min-mile" className={subLabelClass}>
@@ -117,7 +145,7 @@ export default function RouteForm({
               <input
                 id="restroom-max-mile"
                 type="number"
-                min="0"
+                min="0.1"
                 step="0.1"
                 value={restroomMaxMile}
                 onChange={(event) => setRestroomMaxMile(event.target.value)}
@@ -126,7 +154,7 @@ export default function RouteForm({
               />
             </div>
           </div>
-        </div>
+        </fieldset>
 
         <div>
           <label htmlFor="elevation-preference" className={labelClass}>
@@ -182,12 +210,18 @@ export default function RouteForm({
         </div>
       </div>
 
+      {formError !== null && (
+        <StatusMessage variant="danger" heading="Check your inputs">
+          {formError}
+        </StatusMessage>
+      )}
+
       <button
         type="submit"
         disabled={startPosition === null || isLoading}
         className="w-full rounded-lg bg-primary px-4 py-2.5 text-sm font-semibold text-on-primary transition-colors hover:bg-primary-hover focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/40 focus-visible:ring-offset-2 focus-visible:ring-offset-background active:bg-primary/95 disabled:cursor-not-allowed disabled:bg-ink-muted/30 disabled:text-ink-muted"
       >
-        {isLoading ? "Scouting routes…" : "Find routes"}
+        {isLoading ? "Building routes…" : "Find routes"}
       </button>
 
       {startPosition === null && (

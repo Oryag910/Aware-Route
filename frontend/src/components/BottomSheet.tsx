@@ -12,6 +12,12 @@ const SNAP_FRACTION: Record<SheetSnap, number> = {
 
 const ORDER: SheetSnap[] = ["peek", "half", "full"];
 
+const SNAP_LABEL: Record<SheetSnap, string> = {
+  peek: "peeked",
+  half: "half-open",
+  full: "fully open",
+};
+
 type BottomSheetProps = {
   snap: SheetSnap;
   onSnapChange: (snap: SheetSnap) => void;
@@ -99,7 +105,7 @@ export default function BottomSheet({
         onTouchStart={onTouchStart}
         onTouchMove={onTouchMove}
         onTouchEnd={onTouchEnd}
-        aria-label="Resize panel"
+        aria-label={`Resize panel (currently ${SNAP_LABEL[snap]})`}
         className="flex flex-none touch-none justify-center py-2.5"
       >
         <span className="h-1.5 w-10 rounded-full bg-border" />
