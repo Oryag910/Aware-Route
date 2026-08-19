@@ -17,7 +17,9 @@ import pytest
 from fastapi.testclient import TestClient
 
 from app.flow.interruptions import InterruptionStore
-from app.graph.loader import GRAPH_PATH
+from app.graph.distances import nearest_node, single_source_paths
+from app.graph.loader import GRAPH_PATH, get_graph
+from app.graph.model import node_coordinate
 from app.main import app, get_eligible_restrooms, get_interruption_store
 from app.rate_limit import rate_limit_dependency
 from app.restrooms.models import Restroom
@@ -229,3 +231,104 @@ def test_local_engine_falls_back_to_ors_on_graph_failure(
     # Prove ORS was genuinely invoked, not just that the response happened
     # to succeed.
     assert fake_provider.calls > 0
+
+
+@pytest.mark.skipif(
+    not GRAPH_PATH.exists(),
+    reason="graph artifact not built (run scripts/build_graph.py)",
+)
+def test_local_engine_round_does_not_return_near_out_and_back_route(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Endpoint-level regression for the reported production bug: an
+    explicit shape="round" request must not return a route that is
+    materially a simple out-and-back (severe retracing, repeated_segment_
+    ratio near 0.5) while still labeled "round". The investigation found
+    two distinct mechanisms that can produce this on the amenity-first
+    path -- a large tuner-added out-and-back spur, and _RETURN_PENALTIES
+    exhaustion down to the plain-shortest-return fallback -- both are
+    covered at the unit level by the focused _round_through_pair /
+    _tuned_round_or_reject tests. This test only checks the
+    user-observable outcome at the endpoint: a restroom close to the
+    start relative to the target (which could anchor either mechanism)
+    is placed alongside a clean one, so the request resolves to a
+    genuine restroom match rather than a 422, and no returned round
+    route comes back severely retraced.
+
+    This does NOT assert which restroom is displayed on which route --
+    local_scoring re-matches restrooms against the finished route
+    geometry, so a clean route generated through one amenity can
+    legitimately display a different one if the finished geometry
+    passes it too. That provenance is not exposed by this API and isn't
+    what this test is about.
+
+    0.4 here is an endpoint regression guard for the catastrophic
+    user-visible case actually observed in production (a near-perfect
+    out-and-back, ~0.5) -- not the 0.15 amenity-first correctness
+    ceiling, which is covered precisely by the generator-level tests.
+    """
+    monkeypatch.setattr("app.main.ROUTING_ENGINE", "local")
+    monkeypatch.setattr("app.main.get_fountains", lambda: [])
+
+    graph = get_graph()
+    start = Coordinate(lat=40.7674, lon=-73.9818)
+    target_m = 5 * 1609.34
+    min_range_m = 1 * 1609.34
+    max_range_m = 4 * 1609.34
+    start_node = nearest_node(graph, start)
+    dists, _paths = single_source_paths(graph, start_node)
+
+    def node_near(target_d: float, tol: float = 150.0) -> int:
+        best_node, best_err = None, float("inf")
+        for node, d in dists.items():
+            if min_range_m <= d <= max_range_m:
+                err = abs(d - target_d)
+                if err < best_err:
+                    best_err, best_node = err, node
+        assert best_node is not None and best_err <= tol, (
+            "graph topology near the test start point changed"
+        )
+        return best_node
+
+    close_node = node_near(1.0 * 1609.34)  # could anchor a near-out-and-back pre-fix
+    far_node = node_near(2.5 * 1609.34)  # clean
+
+    def make_restroom(name: str, node: int) -> Restroom:
+        coord = node_coordinate(graph, node)
+        return Restroom(
+            source_id=name,
+            facility_name=name,
+            status="Operational",
+            hours_of_operation=None,
+            accessibility=None,
+            website=None,
+            latitude=coord.lat,
+            longitude=coord.lon,
+        )
+
+    app.dependency_overrides[get_eligible_restrooms] = lambda: [
+        make_restroom("close", close_node),
+        make_restroom("far", far_node),
+    ]
+
+    response = client.post(
+        "/routes/with-restroom",
+        json={
+            "start_lat": start.lat,
+            "start_lon": start.lon,
+            "target_distance_m": target_m,
+            "restroom_min_mile": 1.0,
+            "restroom_max_mile": 4.0,
+            "elevation_preference": "moderate",
+            "shape": "round",
+            "count": 3,
+        },
+    )
+
+    assert response.status_code == 200, response.text
+    routes = response.json()
+    assert routes
+    assert any(route["matched"] for route in routes)
+
+    for route in routes:
+        assert route["repeated_segment_ratio"] < 0.4

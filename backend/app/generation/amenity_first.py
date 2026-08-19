@@ -7,6 +7,7 @@ from app.generation.length_tune import (
     _spur_path,
     tune_pair_to_target,
 )
+from app.generation.quality import edge_reuse_ratio
 from app.generation.reuse_penalty import REUSE_PENALTY, reuse_penalized_return_path
 from app.generation.shape_metrics import isoperimetric_quotient
 from app.graph.distances import (
@@ -33,6 +34,29 @@ CANDIDATE_MULTIPLIER = 2
 # a little roundness for hitting the distance. Penalty 1.0 is the plain
 # shortest path back (a there-and-back), which always fits.
 _RETURN_PENALTIES = (REUSE_PENALTY, 2.5, 1.6, 1.0)
+
+# Empirically chosen correctness ceiling for amenity-first candidates
+# represented to the caller as "round", grounded in a 537-scenario
+# threshold study. An explicit round request must not silently
+# degrade into a materially out-and-back route. Two mechanisms push
+# edge_reuse_ratio this high specifically on the amenity-first path:
+#   1. a large tuner-added out-and-back spur, when the amenity-anchored
+#      core loop undershoots the target by a lot (tune_pair_to_target
+#      pads the residual with a start-prepended there-and-back spur);
+#   2. _RETURN_PENALTIES exhaustion down to the plain-shortest-return
+#      fallback (1.0), which is generically the outbound path reversed
+#      -- edge_reuse_ratio lands at ~0.5 (a simple out-and-back) when
+#      this fires, with no tuner spur involved at all.
+# The benchmark isolated this: amenity-first produced many ~0.5 (near-
+# total, simple-out-and-back) round candidates, while ordinary Manhattan
+# round generation produced ZERO candidates >= 0.4 across all 537
+# scenarios. Ordinary round candidates do occasionally exceed 0.15
+# (modestly, up to ~0.19) from ordinary street-grid reuse -- this is a
+# targeted amenity-first correctness gate, not a global round-quality
+# floor, so it is scoped to this module only. 0.15 was selected from the
+# measured threshold study: 10% and 15% produced the same maximal
+# practical improvement, while thresholds above ~20% degraded quickly.
+MAX_AMENITY_ROUND_EDGE_REUSE_RATIO = 0.15
 
 
 @dataclass(frozen=True)
@@ -132,6 +156,29 @@ def _out_and_back_placed(
     return path_to_candidate(graph, node_path), node_path
 
 
+def _tuned_round_or_reject(
+    graph: Any,
+    start_node: int,
+    candidate: RouteCandidate,
+    loop: list[int],
+    target_distance_m: float,
+    dists: dict[int, float],
+    paths: dict[int, list[int]] | None,
+) -> tuple[RouteCandidate, list[int]] | None:
+    """Tune a round amenity-first loop to target length, then reject the
+    result if it materially retraces itself (see
+    MAX_AMENITY_ROUND_EDGE_REUSE_RATIO) rather than silently returning it
+    labeled "round". Shared by both `_round_through_pair` return paths so
+    neither can bypass the check."""
+    tuned_candidate, tuned_path = tune_pair_to_target(
+        graph, start_node, candidate, loop, target_distance_m,
+        dists=dists, paths=paths,
+    )
+    if edge_reuse_ratio(tuned_path) > MAX_AMENITY_ROUND_EDGE_REUSE_RATIO:
+        return None
+    return tuned_candidate, tuned_path
+
+
 def _round_through_pair(
     graph: Any,
     start_node: int,
@@ -152,6 +199,13 @@ def _round_through_pair(
     for a real loop and produced a straight there-and-back with a nub.
     Treating the amenity as the loop's turnaround instead keeps the full
     radius available for enclosing area.
+
+    Both outcomes below (the roundest penalty that fits under target, and
+    the shortest-found fallback when none do) go through
+    `_tuned_round_or_reject`: a tuned candidate that still comes out
+    materially retracing itself is rejected (None) rather than returned
+    mislabeled "round" -- the caller (`through_amenities_pairs`) then
+    naturally tries the next amenity placement instead.
     """
     try:
         outbound = outbound_path(graph, start_node, amenity_node, paths)
@@ -183,17 +237,16 @@ def _round_through_pair(
 
         if candidate.distance_m <= ceiling:
             # Roundest penalty that fits: spur the residual up to target.
-            return tune_pair_to_target(
+            return _tuned_round_or_reject(
                 graph, start_node, candidate, loop, target_distance_m,
-                dists=dists, paths=paths,
+                dists, paths,
             )
 
     if best is None:
         return None
 
-    return tune_pair_to_target(
-        graph, start_node, best[0], best[1], target_distance_m,
-        dists=dists, paths=paths,
+    return _tuned_round_or_reject(
+        graph, start_node, best[0], best[1], target_distance_m, dists, paths,
     )
 
 
