@@ -61,9 +61,15 @@ def edge_reuse_ratio(node_path: list[int]) -> float:
 
     Walks `node_path` as a sequence of (u, v) hops, normalizes each hop
     to an undirected `frozenset({u, v})` key, and counts how many hops
-    land on a key already seen. 0.0 means every hop crosses new ground;
-    ~1.0 means the route is a pure out-and-back (every hop after the
-    turnaround retraces a prior one). This is a signal, not a
+    land on a key already seen. 0.0 means every hop crosses a
+    previously unseen undirected edge. A simple one-pass out-and-back
+    (walk `n` unique edges out, then reverse over the same `n` edges
+    once) is ~0.5: the `n` outbound hops are each the first sighting of
+    their edge, then the `n` return hops each revisit one, so `n` of
+    the `2n` total hops are reused. 0.5 is not a ceiling, though --
+    routes that traverse already-used edges more than twice (e.g. a
+    corrective loop that re-walks the same block repeatedly) push the
+    ratio higher, up toward 1.0 in the limit. This is a signal, not a
     penalty -- an out-and-back is a valid requested shape, so the
     scorer decides how to weight it per-shape.
 
