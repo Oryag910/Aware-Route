@@ -1,6 +1,6 @@
 """Focused, synthetic tests for the PR10 benchmark measurement helpers in
 scripts/benchmark_suite.py: the short-start-return-spur detector and the
-undirected route-edge overlap (diversity) metric. No graph load --
+undirected route-segment overlap (diversity) metric. No graph load --
 geometry is built by hand with app.routing.geometry.destination_point so
 segment lengths are exact.
 """
@@ -12,9 +12,9 @@ from scripts.benchmark_suite import (
     ScenarioResult,
     SHORT_SPUR_MAX_PATH_M,
     SHORT_SPUR_MIN_PATH_M,
-    _edge_overlap,
-    _pairwise_edge_overlaps,
-    _route_edge_signature,
+    _pairwise_segment_overlaps,
+    _route_segment_signature,
+    _segment_overlap,
     _short_start_return_spur,
 )
 
@@ -141,17 +141,20 @@ def test_short_spur_start_return_above_maximum_is_false() -> None:
 
 
 def test_short_spur_start_return_below_minimum_is_false() -> None:
-    # Returns close to the start, but the round trip is only ~9m --
-    # well under SHORT_SPUR_MIN_PATH_M (40m). Too small to be a
-    # meaningful corrective spur.
-    geometry = _walk(ORIGIN, [(90.0, 3.0), (45.0, 3.0), (90.0, 3.0)])
+    # Genuinely returns to ORIGIN -- the last point IS geometry[0], so
+    # the start-return condition is unquestionably satisfied here. Only
+    # the traveled distance (~6m: 3m out + 3m back) is below
+    # SHORT_SPUR_MIN_PATH_M (40m), which is what this test proves: a
+    # real but too-small out-and-back doesn't count as a spur.
+    away = destination_point(ORIGIN, 90.0, 3.0)  # 3m east
+    geometry = (_point(ORIGIN), _point(away), _point(ORIGIN))
 
-    assert sum((3.0, 3.0, 3.0)) < SHORT_SPUR_MIN_PATH_M
+    assert 2 * 3.0 < SHORT_SPUR_MIN_PATH_M
     assert _short_start_return_spur(geometry) is False
 
 
 # ---------------------------------------------------------------------------
-# _route_edge_signature / _edge_overlap
+# _route_segment_signature / _segment_overlap
 # ---------------------------------------------------------------------------
 
 _A = RoutePoint(lat=0.0, lon=0.0, elevation_m=0.0)
@@ -163,39 +166,39 @@ _FAR2 = RoutePoint(lat=5.0, lon=5.001, elevation_m=0.0)
 _FAR3 = RoutePoint(lat=5.001, lon=5.001, elevation_m=0.0)
 
 
-def test_edge_overlap_identical_route_is_one() -> None:
-    edges = _route_edge_signature((_A, _B, _C))
+def test_segment_overlap_identical_route_is_one() -> None:
+    segments = _route_segment_signature((_A, _B, _C))
 
-    assert _edge_overlap(edges, edges) == 1.0
+    assert _segment_overlap(segments, segments) == 1.0
 
 
-def test_edge_overlap_same_route_reversed_is_one() -> None:
-    forward = _route_edge_signature((_A, _B, _C))
-    reversed_ = _route_edge_signature((_C, _B, _A))
+def test_segment_overlap_same_route_reversed_is_one() -> None:
+    forward = _route_segment_signature((_A, _B, _C))
+    reversed_ = _route_segment_signature((_C, _B, _A))
 
     assert forward == reversed_
-    assert _edge_overlap(forward, reversed_) == 1.0
+    assert _segment_overlap(forward, reversed_) == 1.0
 
 
-def test_edge_overlap_disjoint_routes_is_zero() -> None:
-    route_a = _route_edge_signature((_A, _B, _C))
-    route_b = _route_edge_signature((_FAR1, _FAR2, _FAR3))
+def test_segment_overlap_disjoint_routes_is_zero() -> None:
+    route_a = _route_segment_signature((_A, _B, _C))
+    route_b = _route_segment_signature((_FAR1, _FAR2, _FAR3))
 
-    assert _edge_overlap(route_a, route_b) == 0.0
+    assert _segment_overlap(route_a, route_b) == 0.0
 
 
-def test_edge_overlap_partial_share_is_correct_fraction() -> None:
+def test_segment_overlap_partial_share_is_correct_fraction() -> None:
     # route1: A-B, B-C. route2: A-B, B-D. Shared: {A-B}. Union: {A-B,
     # B-C, B-D} -- overlap = 1/3.
-    route1 = _route_edge_signature((_A, _B, _C))
-    route2 = _route_edge_signature((_A, _B, _D))
+    route1 = _route_segment_signature((_A, _B, _C))
+    route2 = _route_segment_signature((_A, _B, _D))
 
-    assert _edge_overlap(route1, route2) == 1 / 3
+    assert _segment_overlap(route1, route2) == 1 / 3
 
 
-def test_edge_signature_ignores_zero_length_duplicate_points() -> None:
-    without_dup = _route_edge_signature((_A, _B, _C))
-    with_dup = _route_edge_signature((_A, _A, _B, _B, _C))
+def test_segment_signature_ignores_zero_length_duplicate_points() -> None:
+    without_dup = _route_segment_signature((_A, _B, _C))
+    with_dup = _route_segment_signature((_A, _A, _B, _B, _C))
 
     assert with_dup == without_dup
 
@@ -205,19 +208,19 @@ def test_edge_signature_ignores_zero_length_duplicate_points() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_pairwise_edge_overlaps_empty_for_fewer_than_two_candidates() -> None:
-    assert _pairwise_edge_overlaps([]) == ()
-    assert _pairwise_edge_overlaps([_candidate((_A, _B, _C))]) == ()
+def test_pairwise_segment_overlaps_empty_for_fewer_than_two_candidates() -> None:
+    assert _pairwise_segment_overlaps([]) == ()
+    assert _pairwise_segment_overlaps([_candidate((_A, _B, _C))]) == ()
 
 
-def test_pairwise_edge_overlaps_computes_all_pairs() -> None:
+def test_pairwise_segment_overlaps_computes_all_pairs() -> None:
     candidates = [
         _candidate((_A, _B, _C)),
         _candidate((_A, _B, _D)),
         _candidate((_FAR1, _FAR2, _FAR3)),
     ]
 
-    overlaps = _pairwise_edge_overlaps(candidates)
+    overlaps = _pairwise_segment_overlaps(candidates)
 
     # 3 candidates -> 3 pairs: (0,1)=1/3, (0,2)=0.0, (1,2)=0.0
     assert len(overlaps) == 3
@@ -230,7 +233,7 @@ def test_scenario_result_has_distinct_alternative_true_below_threshold() -> None
         ok=True,
         error=None,
         time_s=0.1,
-        edge_overlaps=(0.9, 0.5),
+        segment_overlaps=(0.9, 0.5),
     )
 
     assert result.has_distinct_alternative is True
@@ -242,7 +245,7 @@ def test_scenario_result_has_distinct_alternative_false_when_all_overlap_high() 
         ok=True,
         error=None,
         time_s=0.1,
-        edge_overlaps=(0.95, 0.99),
+        segment_overlaps=(0.95, 0.99),
     )
 
     assert result.has_distinct_alternative is False
@@ -254,7 +257,7 @@ def test_scenario_result_has_distinct_alternative_false_when_no_overlaps() -> No
         ok=True,
         error=None,
         time_s=0.1,
-        edge_overlaps=(),
+        segment_overlaps=(),
     )
 
     assert result.has_distinct_alternative is False

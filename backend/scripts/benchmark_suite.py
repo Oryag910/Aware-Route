@@ -18,8 +18,8 @@ Manhattan graph via `app.generation.engine.generate_candidates` /
     out_and_back route's turnaround), and connectivity/validity (dedup'd
     node path length vs geometry point count, is the geometry a single
     connected walk with no huge jumps)
-  - route-edge diversity: undirected edge-set overlap between a
-    scenario's candidate alternatives
+  - route-segment diversity: undirected rendered-geometry segment
+    overlap between a scenario's candidate alternatives
 
 Graph-network constraint: routes are generated exclusively on the
 committed OSMnx walk graph. This benchmark does not separately test for
@@ -117,13 +117,18 @@ SHORT_SPUR_MIN_PATH_M = 40.0
 SHORT_SPUR_MAX_PATH_M = 250.0
 SHORT_SPUR_START_REVISIT_RADIUS_M = 1.0
 
-# Undirected route-edge overlap (Jaccard index over undirected edge
-# sets, see `_route_edge_signature` / `_edge_overlap`) between two
-# candidates in the same scenario. Coordinates are rounded to 6 decimal
-# places (~0.11m at NYC's latitude) before forming edges -- candidates
-# come from committed graph-node coordinates, so this collapses
-# floating-point noise without merging distinct intersections.
-EDGE_COORD_PRECISION = 6
+# Undirected route-segment overlap (Jaccard index over undirected
+# rendered-geometry segment sets, see `_route_segment_signature` /
+# `_segment_overlap`) between two candidates in the same scenario. Each
+# route is represented as the set of undirected consecutive segments in
+# its RENDERED geometry (app.graph.model.path_to_geometry), not the
+# underlying OSMnx/NetworkX graph edges -- a single graph edge's
+# LineString can expand into several rendered-geometry segments, so this
+# is a proxy for path similarity, not a literal graph-edge-identity
+# check. Coordinates are rounded to 6 decimal places (~0.11m at NYC's
+# latitude) before forming segments, collapsing floating-point noise
+# without merging distinct points.
+SEGMENT_COORD_PRECISION = 6
 
 # Reporting threshold (not a routing/scoring constant): a candidate pair
 # at/below this overlap is considered a "meaningfully distinct"
@@ -173,9 +178,9 @@ class ScenarioResult:
     error: str | None
     time_s: float
     candidates: list[CandidateReport] = field(default_factory=list)
-    # Pairwise undirected route-edge overlap for every candidate pair in
-    # this scenario (empty when fewer than 2 candidates).
-    edge_overlaps: tuple[float, ...] = ()
+    # Pairwise undirected route-segment overlap for every candidate pair
+    # in this scenario (empty when fewer than 2 candidates).
+    segment_overlaps: tuple[float, ...] = ()
 
     @property
     def best_error_m(self) -> float | None:
@@ -203,11 +208,11 @@ class ScenarioResult:
 
     @property
     def has_distinct_alternative(self) -> bool:
-        """True if at least one candidate pair has edge overlap at/below
-        DISTINCT_ALTERNATIVE_MAX_OVERLAP -- see that constant's docstring
-        for what "distinct" means here."""
+        """True if at least one candidate pair has segment overlap
+        at/below DISTINCT_ALTERNATIVE_MAX_OVERLAP -- see that constant's
+        docstring for what "distinct" means here."""
         return any(
-            overlap <= DISTINCT_ALTERNATIVE_MAX_OVERLAP for overlap in self.edge_overlaps
+            overlap <= DISTINCT_ALTERNATIVE_MAX_OVERLAP for overlap in self.segment_overlaps
         )
 
 
@@ -248,53 +253,58 @@ def _short_start_return_spur(geometry: tuple[Any, ...]) -> bool:
     return False
 
 
-EdgeSignature = frozenset[tuple[tuple[float, float], tuple[float, float]]]
+SegmentSignature = frozenset[tuple[tuple[float, float], tuple[float, float]]]
 
 
-def _route_edge_signature(geometry: tuple[Any, ...]) -> EdgeSignature:
-    """Undirected set of edges implied by a route's geometry polyline.
+def _route_segment_signature(geometry: tuple[Any, ...]) -> SegmentSignature:
+    """Undirected set of segments implied by a route's RENDERED geometry
+    polyline (app.graph.model.path_to_geometry) -- not the underlying
+    OSMnx/NetworkX graph edges. A single graph edge's LineString can
+    expand into several rendered-geometry segments, so this is a proxy
+    for path similarity, not a literal graph-edge-identity check.
 
-    Each consecutive geometry pair becomes an edge, keyed by its
-    endpoints rounded to EDGE_COORD_PRECISION decimals. Edges are stored
-    as a sorted (min, max) tuple so A->B and B->A -- the same physical
-    street segment walked in either direction -- collapse to one edge.
-    Zero-length pairs (duplicate consecutive points, which can occur at
-    route joins/spurs) are skipped since they carry no positional
-    information and would otherwise inflate the "shared edges" count for
-    two otherwise-different routes."""
-    edges: set[tuple[tuple[float, float], tuple[float, float]]] = set()
+    Each consecutive geometry pair becomes a segment, keyed by its
+    endpoints rounded to SEGMENT_COORD_PRECISION decimals. Segments are
+    stored as a sorted (min, max) tuple so A->B and B->A -- the same
+    physical stretch of path walked in either direction -- collapse to
+    one segment. Zero-length pairs (duplicate consecutive points, which
+    can occur at route joins/spurs) are skipped since they carry no
+    positional information and would otherwise inflate the "shared
+    segments" count for two otherwise-different routes."""
+    segments: set[tuple[tuple[float, float], tuple[float, float]]] = set()
 
     for a, b in zip(geometry, geometry[1:]):
-        point_a = (round(a.lat, EDGE_COORD_PRECISION), round(a.lon, EDGE_COORD_PRECISION))
-        point_b = (round(b.lat, EDGE_COORD_PRECISION), round(b.lon, EDGE_COORD_PRECISION))
+        point_a = (round(a.lat, SEGMENT_COORD_PRECISION), round(a.lon, SEGMENT_COORD_PRECISION))
+        point_b = (round(b.lat, SEGMENT_COORD_PRECISION), round(b.lon, SEGMENT_COORD_PRECISION))
         if point_a == point_b:
             continue
-        edge = (point_a, point_b) if point_a <= point_b else (point_b, point_a)
-        edges.add(edge)
+        segment = (point_a, point_b) if point_a <= point_b else (point_b, point_a)
+        segments.add(segment)
 
-    return frozenset(edges)
+    return frozenset(segments)
 
 
-def _edge_overlap(edges_a: EdgeSignature, edges_b: EdgeSignature) -> float:
-    """Undirected route-edge overlap: |A ∩ B| / |A ∪ B| (Jaccard index)
-    over two routes' edge sets. 0.0 = no shared street edges, 1.0 =
-    identical edge set (including the same route walked in reverse,
-    since edges are undirected)."""
-    union = edges_a | edges_b
+def _segment_overlap(segments_a: SegmentSignature, segments_b: SegmentSignature) -> float:
+    """Undirected route-segment overlap: |A ∩ B| / |A ∪ B| (Jaccard
+    index) over two routes' rendered-geometry segment sets. 0.0 = no
+    shared rendered route segments, 1.0 = identical segment set
+    (including the same route walked in reverse, since segments are
+    undirected)."""
+    union = segments_a | segments_b
     if not union:
         return 0.0
-    return len(edges_a & edges_b) / len(union)
+    return len(segments_a & segments_b) / len(union)
 
 
-def _pairwise_edge_overlaps(candidates: list[RouteCandidate]) -> tuple[float, ...]:
-    """Pairwise undirected route-edge overlap for every candidate pair
-    in a scenario's result set (empty if fewer than 2 candidates)."""
+def _pairwise_segment_overlaps(candidates: list[RouteCandidate]) -> tuple[float, ...]:
+    """Pairwise undirected route-segment overlap for every candidate
+    pair in a scenario's result set (empty if fewer than 2 candidates)."""
     if len(candidates) < 2:
         return ()
 
-    signatures = [_route_edge_signature(c.geometry) for c in candidates]
+    signatures = [_route_segment_signature(c.geometry) for c in candidates]
     return tuple(
-        _edge_overlap(signatures[i], signatures[j])
+        _segment_overlap(signatures[i], signatures[j])
         for i in range(len(signatures))
         for j in range(i + 1, len(signatures))
     )
@@ -439,7 +449,7 @@ def run_scenario(
             error=None,
             time_s=elapsed,
             candidates=reports,
-            edge_overlaps=_pairwise_edge_overlaps(candidates),
+            segment_overlaps=_pairwise_segment_overlaps(candidates),
         ),
         candidates,
     )
@@ -463,7 +473,7 @@ class ShapeQuality:
     excessive_repeated_segments_pct: float
     short_start_return_spur_pct: float
     scenarios_with_alternatives: int
-    median_edge_overlap: float | None
+    median_segment_overlap: float | None
     distinct_alternative_pct: float | None
     distinct_alternative_count: int
 
@@ -485,7 +495,7 @@ def _shape_quality(ok_results: list[ScenarioResult], shape: str) -> ShapeQuality
     )
 
     alt_bucket = [r for r in bucket if len(r.candidates) >= 2]
-    overlaps = [overlap for r in alt_bucket for overlap in r.edge_overlaps]
+    overlaps = [overlap for r in alt_bucket for overlap in r.segment_overlaps]
     median_overlap = statistics.median(overlaps) if overlaps else None
     distinct = [r for r in alt_bucket if r.has_distinct_alternative]
     distinct_pct = 100.0 * len(distinct) / len(alt_bucket) if alt_bucket else None
@@ -496,7 +506,7 @@ def _shape_quality(ok_results: list[ScenarioResult], shape: str) -> ShapeQuality
         excessive_repeated_segments_pct=repeated_pct,
         short_start_return_spur_pct=spur_pct,
         scenarios_with_alternatives=len(alt_bucket),
-        median_edge_overlap=median_overlap,
+        median_segment_overlap=median_overlap,
         distinct_alternative_pct=distinct_pct,
         distinct_alternative_count=len(distinct),
     )
@@ -563,7 +573,7 @@ def build_report(results: list[ScenarioResult]) -> str:
     )
 
     alt_results = [r for r in ok_results if len(r.candidates) >= 2]
-    all_overlaps = [overlap for r in alt_results for overlap in r.edge_overlaps]
+    all_overlaps = [overlap for r in alt_results for overlap in r.segment_overlaps]
     median_overlap = statistics.median(all_overlaps) if all_overlaps else None
     distinct_results = [r for r in alt_results if r.has_distinct_alternative]
     distinct_pct = (
@@ -586,7 +596,7 @@ def build_report(results: list[ScenarioResult]) -> str:
     # instead of letting scenarios with more candidate pairs (e.g. 10
     # pairs at count=5 vs. 1 pair at count=2) dominate.
     per_scenario_medians = [
-        statistics.median(r.edge_overlaps) for r in alt_results if r.edge_overlaps
+        statistics.median(r.segment_overlaps) for r in alt_results if r.segment_overlaps
     ]
     median_of_scenario_medians = (
         statistics.median(per_scenario_medians) if per_scenario_medians else None
@@ -623,7 +633,7 @@ def build_report(results: list[ScenarioResult]) -> str:
     )
     lines.append(
         f"- Scenarios with a meaningfully distinct alternative (>=1 candidate "
-        f"pair with undirected route-edge overlap <= {DISTINCT_ALTERNATIVE_MAX_OVERLAP:.2f}, "
+        f"pair with undirected route-segment overlap <= {DISTINCT_ALTERNATIVE_MAX_OVERLAP:.2f}, "
         f"scenarios w/ >=2 candidates): "
         f"**{distinct_pct:.1f}%** ({len(distinct_results)}/{len(alt_results)})"
     )
@@ -677,18 +687,23 @@ def build_report(results: list[ScenarioResult]) -> str:
         "routes can only use edges present in the walk-network artifact."
     )
     lines.append("")
-    lines.append("## Diversity (undirected route-edge overlap)")
+    lines.append("## Diversity (undirected route-segment overlap)")
     lines.append("")
     lines.append(
-        "For scenarios with >=2 candidates: pairwise undirected route-edge "
-        "overlap (Jaccard index over each candidate's rounded-coordinate "
-        "edge set -- see `_route_edge_signature` / `_edge_overlap`). "
-        "0.0 = no shared street edges between a pair, 1.0 = identical edge "
-        "set (including the same route walked in reverse)."
+        "Each route is represented as the set of undirected consecutive "
+        "segments in its rendered geometry, after rounding endpoint "
+        "coordinates to six decimal places (see `_route_segment_signature` "
+        "/ `_segment_overlap`). Pairwise overlap is the Jaccard index over "
+        "those segment sets, for scenarios with >=2 candidates. Note this "
+        "is rendered-geometry segments, not underlying OSMnx/NetworkX "
+        "graph edges -- a single graph edge's LineString can expand into "
+        "several rendered segments. 0.0 = no shared rendered route "
+        "segments between a pair, 1.0 = identical rendered segment set "
+        "(including the same route walked in reverse)."
     )
     lines.append("")
     lines.append(
-        f"- Median pairwise edge overlap (all candidate pairs pooled): "
+        f"- Median pairwise segment overlap (all candidate pairs pooled): "
         f"{f'{median_overlap:.3f}' if median_overlap is not None else 'n/a'}"
     )
     lines.append(
@@ -717,7 +732,7 @@ def build_report(results: list[ScenarioResult]) -> str:
     lines.append("")
     lines.append(
         "Out-and-back routes structurally retrace most of their own "
-        "outbound edges on the return leg by definition, so their edge "
+        "outbound path on the return leg by definition, so their segment "
         "overlap is not directly comparable to round/mix routes -- see "
         "the shape breakdown below."
     )
@@ -727,21 +742,21 @@ def build_report(results: list[ScenarioResult]) -> str:
     lines.append(
         "100% repeated-segment reuse is expected by definition for "
         "out_and_back routes (the return leg retraces the outbound "
-        "edges); the same rate on a round route is a genuine defect "
+        "path); the same rate on a round route is a genuine defect "
         "signal."
     )
     lines.append("")
     lines.append(
         "| shape | candidates | excessive_repeated_segments | "
         "short_start_return_spur | scenarios w/ alternatives | "
-        "median edge overlap | >=1 distinct pair |"
+        "median segment overlap | >=1 distinct pair |"
     )
     lines.append("|---|---|---|---|---|---|---|")
     for shape in REPORT_SHAPES:
         quality = shape_quality[shape]
         median_str = (
-            f"{quality.median_edge_overlap:.3f}"
-            if quality.median_edge_overlap is not None
+            f"{quality.median_segment_overlap:.3f}"
+            if quality.median_segment_overlap is not None
             else "n/a"
         )
         distinct_str = (
