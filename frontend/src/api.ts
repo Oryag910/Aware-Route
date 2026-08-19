@@ -54,12 +54,60 @@ export type RankedRoute = {
 
 export class ApiError extends Error {
   status: number;
+  // True when `status` is 422 but the body is FastAPI's automatic request-
+  // validation shape (`detail` is a list), not the app's deliberate
+  // "no route found" 422 (`detail` is a string). Callers use this to tell
+  // the two apart without re-inspecting the response body.
+  isValidationError: boolean;
 
-  constructor(message: string, status: number) {
+  constructor(message: string, status: number, isValidationError = false) {
     super(message);
     this.name = "ApiError";
     this.status = status;
+    this.isValidationError = isValidationError;
   }
+}
+
+// Thrown when `fetch` itself rejects (DNS failure, offline, CORS, backend
+// unreachable) rather than returning an HTTP error response -- there's no
+// status code or JSON body to inspect in this case.
+export class NetworkError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "NetworkError";
+  }
+}
+
+// FastAPI's automatic validation-error shape: `detail` is a list of these.
+// The app's own deliberate HTTPExceptions always send a plain string detail.
+type ValidationErrorItem = { msg?: unknown };
+
+function parseErrorDetail(body: unknown): {
+  message: string;
+  isValidationError: boolean;
+} {
+  if (typeof body !== "object" || body === null || !("detail" in body)) {
+    return { message: "Request failed", isValidationError: false };
+  }
+
+  const detail = (body as { detail?: unknown }).detail;
+
+  if (typeof detail === "string") {
+    return { message: detail, isValidationError: false };
+  }
+
+  if (Array.isArray(detail)) {
+    const messages = (detail as ValidationErrorItem[])
+      .map((item) => (typeof item.msg === "string" ? item.msg : null))
+      .filter((msg): msg is string => msg !== null);
+
+    return {
+      message: messages.length > 0 ? messages.join("; ") : "Invalid request.",
+      isValidationError: true,
+    };
+  }
+
+  return { message: "Request failed", isValidationError: false };
 }
 
 // API base URL scheme:
@@ -105,26 +153,37 @@ export async function fetchRankedRoutes(
     body.workout_type = values.workoutType;
   }
 
-  const response = await fetch(apiUrl("/routes/with-restroom"), {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify(body),
-  });
+  let response: Response;
+
+  try {
+    response = await fetch(apiUrl("/routes/with-restroom"), {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(body),
+    });
+  } catch {
+    // fetch() rejects (rather than resolving with a non-ok response) when
+    // the request never reached a server at all.
+    throw new NetworkError(
+      "Couldn't reach the route service. Check your connection and try again.",
+    );
+  }
 
   if (!response.ok) {
-    let detail: string | undefined;
+    let message = "Request failed";
+    let isValidationError = false;
 
     try {
-      const body = (await response.json()) as { detail?: string };
-      detail = body.detail;
+      const errorBody: unknown = await response.json();
+      ({ message, isValidationError } = parseErrorDetail(errorBody));
     } catch {
       // Response body wasn't valid JSON (e.g. a proxy/gateway error
       // page returned when the backend itself is unreachable).
     }
 
-    throw new ApiError(detail ?? "Request failed", response.status);
+    throw new ApiError(message, response.status, isValidationError);
   }
 
   return (await response.json()) as RankedRoute[];

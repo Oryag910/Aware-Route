@@ -1,6 +1,6 @@
 import type { RankedRoute } from "../api";
 import { routeFacts, tradeoffLine } from "../explanations";
-import { AlertCircle, CheckCircle, Star } from "../icons";
+import { AlertCircle, CheckCircle, Info, Star } from "../icons";
 
 const ARCHETYPE_LABELS: Record<string, string> = {
   best_overall: "Best overall",
@@ -62,7 +62,12 @@ export default function RouteResults({
                 {route.matched ? (
                   <span className="inline-flex items-center gap-1 rounded-full bg-success/15 px-2.5 py-0.5 text-xs font-semibold text-success">
                     <CheckCircle className="h-3.5 w-3.5" />
-                    Matched
+                    Restroom matched
+                  </span>
+                ) : route.restroom.kind === "fountain" ? (
+                  <span className="inline-flex items-center gap-1 rounded-full bg-accent-sky/15 px-2.5 py-0.5 text-xs font-semibold text-accent-sky">
+                    <Info className="h-3.5 w-3.5" />
+                    Fountain fallback
                   </span>
                 ) : (
                   <span className="inline-flex items-center gap-1 rounded-full bg-warning/15 px-2.5 py-0.5 text-xs font-semibold text-warning">
@@ -79,7 +84,14 @@ export default function RouteResults({
                 )}
               </div>
 
-              {!route.matched && (
+              {!route.matched && route.restroom.kind === "fountain" && (
+                <p className="mt-1.5 text-sm text-accent-sky">
+                  No eligible restroom matched your requested range. This
+                  closest route includes a water fountain instead.
+                </p>
+              )}
+
+              {!route.matched && route.restroom.kind !== "fountain" && (
                 <p className="mt-1.5 text-sm text-warning">
                   Doesn't quite hit your requested distance or restroom range —
                   closest option found.
