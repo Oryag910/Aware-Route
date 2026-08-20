@@ -14,6 +14,7 @@ from app.amenities.models import Amenity
 from app.amenities.snapping import snap_amenities
 from app.facilities.catalog import load_facility_catalog
 from app.facilities.models import FacilityKind, FacilityRequirement, RequirementResult
+from app.facilities.oab_planner import plan_constrained_out_and_back
 from app.facilities.orchestration import ConstrainedPlanner, ScoredRoute, plan_routes
 from app.facilities.round_planner import plan_constrained_round
 from app.flow.interruptions import (
@@ -134,7 +135,10 @@ MAX_FACILITY_REQUIREMENTS = 20
 # doesn't yield enough fully valid candidates (see
 # app/facilities/orchestration.py's plan_routes). Each is a no-op for
 # shapes/requirements it doesn't apply to.
-DEFAULT_CONSTRAINED_PLANNERS: list[ConstrainedPlanner] = [plan_constrained_round]
+DEFAULT_CONSTRAINED_PLANNERS: list[ConstrainedPlanner] = [
+    plan_constrained_round,
+    plan_constrained_out_and_back,
+]
 
 
 class RestroomRouteRequest(BaseModel):
