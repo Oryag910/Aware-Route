@@ -20,6 +20,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any, Literal
 
+from app.facilities.diversity import select_diverse
 from app.facilities.models import Facility, FacilityRequirement
 from app.facilities.scoring import (
     FacilityScore,
@@ -110,6 +111,55 @@ def natural_match_pool(
     return generate_routes(graph, start, target_distance_m, shape, pool_size)
 
 
+# count -> (round, out_and_back) target allocation for "mix" requests
+# with real candidates of both shapes available. Gracefully backfills
+# from the overall best-ranked remainder when one shape is short --
+# hard-constraint/quality rank (via `rank_key`) always outranks hitting
+# the exact portfolio quota.
+MIX_SHAPE_ALLOCATION: dict[int, tuple[int, int]] = {
+    1: (1, 0),
+    2: (1, 1),
+    3: (2, 1),
+    4: (2, 2),
+    5: (3, 2),
+}
+
+
+def _select_mix_portfolio(scored: list[ScoredRoute], count: int) -> list[ScoredRoute]:
+    if count <= 1 or not scored:
+        return scored[:count]
+
+    target_round, target_oab = MIX_SHAPE_ALLOCATION.get(
+        count, (count - count // 2, count // 2)
+    )
+
+    def geometry_of(item: ScoredRoute) -> Any:
+        return item.route.candidate.geometry
+
+    rounds = [s for s in scored if s.route.shape == "round"]
+    out_and_backs = [s for s in scored if s.route.shape == "out_and_back"]
+
+    chosen = select_diverse(rounds, geometry_of, target_round) + select_diverse(
+        out_and_backs, geometry_of, target_oab
+    )
+    chosen_ids = {id(item) for item in chosen}
+
+    if len(chosen) < count:
+        for item in scored:
+            if len(chosen) >= count:
+                break
+            if id(item) in chosen_ids:
+                continue
+            chosen.append(item)
+            chosen_ids.add(id(item))
+
+    # Diversity/portfolio selection only decides membership -- restore
+    # overall rank order for display.
+    rank_position = {id(item): index for index, item in enumerate(scored)}
+    chosen.sort(key=lambda item: rank_position[id(item)])
+    return chosen[:count]
+
+
 # Signature for a constrained-planner hook: given the same inputs
 # `plan_routes` receives, return extra `GeneratedRoute` candidates to
 # fold into the same pool before scoring. Phase 3/4/5 register planners
@@ -163,4 +213,7 @@ def plan_routes(
                 pool + new_routes, target_distance_m, requirements, facilities
             )
 
-    return scored[:count]
+    if shape == "mix":
+        return _select_mix_portfolio(scored, count)
+
+    return select_diverse(scored, lambda s: s.route.candidate.geometry, count)

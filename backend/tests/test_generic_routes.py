@@ -259,6 +259,75 @@ def test_x_route_engine_header_present() -> None:
     assert response.headers["X-Route-Engine"] == "local"
 
 
+def test_real_restroom_satisfied_end_to_end(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A real restroom placed at a real graph node roughly at the
+    requested cumulative distance is genuinely satisfied end to end
+    (natural match and/or the constrained round planner -- this test
+    doesn't care which, only that the full pipeline wires together)."""
+    from app.graph.distances import nearest_node, single_source_paths
+    from app.graph.loader import get_graph
+    from app.graph.model import node_coordinate
+    from app.routing.provider import Coordinate
+
+    monkeypatch.setattr("app.main.get_fountains", lambda: [])
+
+    graph = get_graph()
+    start = Coordinate(lat=40.7674, lon=-73.9818)
+    target_m = 5 * 1609.34
+    start_node = nearest_node(graph, start)
+    dists, _paths = single_source_paths(graph, start_node)
+
+    min_range_m, max_range_m = 1 * 1609.34, 4 * 1609.34
+    best_node, best_err = None, float("inf")
+    target_d = 2.5 * 1609.34
+    for node, d in dists.items():
+        if min_range_m <= d <= max_range_m:
+            err = abs(d - target_d)
+            if err < best_err:
+                best_err, best_node = err, node
+    assert best_node is not None
+
+    coord = node_coordinate(graph, best_node)
+    restroom = Restroom(
+        source_id="e2e-test",
+        facility_name="E2E Test Restroom",
+        status="Operational",
+        hours_of_operation=None,
+        accessibility=None,
+        website=None,
+        latitude=coord.lat,
+        longitude=coord.lon,
+    )
+    monkeypatch.setattr(
+        "app.main.fetch_eligible_restrooms", lambda client: [restroom]  # noqa: ARG005
+    )
+    monkeypatch.setattr("app.main.get_supabase_client", lambda: object())
+
+    response = client.post(
+        "/routes",
+        json={
+            "start_lat": start.lat,
+            "start_lon": start.lon,
+            "target_distance_m": target_m,
+            "facility_requirements": [
+                {
+                    "id": "r1",
+                    "kind": "restroom",
+                    "min_distance_m": min_range_m,
+                    "max_distance_m": max_range_m,
+                }
+            ],
+            "shape": "mix",
+            "count": 3,
+        },
+    )
+
+    assert response.status_code == 200, response.text
+    routes = response.json()
+    assert routes
+    assert any(route["constraints_satisfied"] for route in routes)
+
+
 def test_no_json_infinity_in_response(monkeypatch: pytest.MonkeyPatch) -> None:
     """An unsatisfiable requirement (no compatible facility exists at
     all) must serialize range_error_m as null, not Infinity."""

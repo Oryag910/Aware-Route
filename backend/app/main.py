@@ -14,7 +14,8 @@ from app.amenities.models import Amenity
 from app.amenities.snapping import snap_amenities
 from app.facilities.catalog import load_facility_catalog
 from app.facilities.models import FacilityKind, FacilityRequirement, RequirementResult
-from app.facilities.orchestration import ScoredRoute, plan_routes
+from app.facilities.orchestration import ConstrainedPlanner, ScoredRoute, plan_routes
+from app.facilities.round_planner import plan_constrained_round
 from app.flow.interruptions import (
     InterruptionStore,
     get_interruption_store as _get_interruption_store,
@@ -128,6 +129,12 @@ MAX_CANDIDATE_DISTANCE_RATIO = 3.0
 # variable-length by construction) so it only ever protects
 # infrastructure, never a real product ask.
 MAX_FACILITY_REQUIREMENTS = 20
+
+# Constrained planners /routes falls back to when natural matching alone
+# doesn't yield enough fully valid candidates (see
+# app/facilities/orchestration.py's plan_routes). Each is a no-op for
+# shapes/requirements it doesn't apply to.
+DEFAULT_CONSTRAINED_PLANNERS: list[ConstrainedPlanner] = [plan_constrained_round]
 
 
 class RestroomRouteRequest(BaseModel):
@@ -873,6 +880,7 @@ def get_routes(
             request.count,
             requirements,
             facilities,
+            constrained_planners=DEFAULT_CONSTRAINED_PLANNERS,
         )
     except HTTPException:
         raise
