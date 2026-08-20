@@ -1,15 +1,40 @@
-import type { RankedRoute } from "../api";
+import type { FacilityResultOut, GenericRoute } from "../api";
 import { routeFacts, tradeoffLine } from "../explanations";
-import { AlertCircle, CheckCircle, Info, Star } from "../icons";
+import { CheckCircle, XCircle } from "../icons";
 
-const ARCHETYPE_LABELS: Record<string, string> = {
-  best_overall: "Best overall",
-  smoothest: "Smoothest",
-  most_scenic: "Most scenic",
+const METERS_PER_MILE = 1609.34;
+
+const FACILITY_KIND_LABELS: Record<FacilityResultOut["kind"], string> = {
+  restroom: "Restroom",
+  water: "Water",
 };
 
+function formatMiles(meters: number): string {
+  return (meters / METERS_PER_MILE).toFixed(1);
+}
+
+function facilityResultLine(result: FacilityResultOut): string {
+  const label = FACILITY_KIND_LABELS[result.kind];
+
+  if (result.satisfied && result.facility !== null) {
+    const mile = formatMiles(result.facility.mile_marker_m);
+    const name = result.facility.name ?? "Unnamed facility";
+    return `${label} · ${mile} mi · ${name}`;
+  }
+
+  const minMile = formatMiles(result.requested_min_m);
+  const maxMile = formatMiles(result.requested_max_m);
+
+  if (result.facility !== null) {
+    const foundMile = formatMiles(result.facility.mile_marker_m);
+    return `${label} · requested ${minMile}-${maxMile} mi · nearest found ${foundMile} mi`;
+  }
+
+  return `${label} · requested ${minMile}-${maxMile} mi · none found nearby`;
+}
+
 type RouteResultsProps = {
-  routes: RankedRoute[];
+  routes: GenericRoute[];
   selectedIndex: number | null;
   onSelect: (index: number) => void;
 };
@@ -42,6 +67,17 @@ export default function RouteResults({
               ? tradeoffLine(route, bestRoute)
               : null;
 
+          const hasRequirements = route.requirements_total > 0;
+          const fullMatch =
+            hasRequirements &&
+            route.requirements_satisfied_count === route.requirements_total;
+          const partialMatch =
+            hasRequirements &&
+            route.requirements_satisfied_count > 0 &&
+            route.requirements_satisfied_count < route.requirements_total;
+          const noMatch =
+            hasRequirements && route.requirements_satisfied_count === 0;
+
           return (
             <button
               key={index}
@@ -52,6 +88,10 @@ export default function RouteResults({
                 isSelected
                   ? "border-primary bg-primary/5 ring-2 ring-primary shadow-sm"
                   : "border-border bg-surface hover:border-primary/50 hover:shadow-sm"
+              } ${
+                !route.constraints_satisfied
+                  ? "border-l-4 border-l-warning"
+                  : ""
               }`}
             >
               <div className="flex flex-wrap items-center gap-2">
@@ -59,42 +99,33 @@ export default function RouteResults({
                   Route {index + 1}
                 </h3>
 
-                {route.matched ? (
+                {hasRequirements && fullMatch && (
                   <span className="inline-flex items-center gap-1 rounded-full bg-success/15 px-2.5 py-0.5 text-xs font-semibold text-success">
                     <CheckCircle className="h-3.5 w-3.5" />
-                    Restroom matched
-                  </span>
-                ) : route.restroom.kind === "fountain" ? (
-                  <span className="inline-flex items-center gap-1 rounded-full bg-accent-sky/15 px-2.5 py-0.5 text-xs font-semibold text-accent-sky">
-                    <Info className="h-3.5 w-3.5" />
-                    Fountain fallback
-                  </span>
-                ) : (
-                  <span className="inline-flex items-center gap-1 rounded-full bg-warning/15 px-2.5 py-0.5 text-xs font-semibold text-warning">
-                    <AlertCircle className="h-3.5 w-3.5" />
-                    Closest available
+                    All {route.requirements_total} requested stops matched
                   </span>
                 )}
 
-                {route.archetype !== null && (
-                  <span className="inline-flex items-center gap-1 rounded-full border border-primary/30 bg-primary/10 px-2.5 py-0.5 text-xs font-semibold text-primary">
-                    <Star className="h-3.5 w-3.5" />
-                    {ARCHETYPE_LABELS[route.archetype] ?? route.archetype}
+                {hasRequirements && partialMatch && (
+                  <span className="inline-flex items-center gap-1 rounded-full bg-warning/15 px-2.5 py-0.5 text-xs font-semibold text-warning">
+                    <CheckCircle className="h-3.5 w-3.5" />
+                    {route.requirements_satisfied_count} of{" "}
+                    {route.requirements_total} requested stops matched
+                  </span>
+                )}
+
+                {hasRequirements && noMatch && (
+                  <span className="inline-flex items-center gap-1 rounded-full bg-danger/15 px-2.5 py-0.5 text-xs font-semibold text-danger">
+                    <XCircle className="h-3.5 w-3.5" />
+                    0 of {route.requirements_total} requested stops matched
                   </span>
                 )}
               </div>
 
-              {!route.matched && route.restroom.kind === "fountain" && (
-                <p className="mt-1.5 text-sm text-accent-sky">
-                  No eligible restroom matched your requested range. This
-                  closest route includes a water fountain instead.
-                </p>
-              )}
-
-              {!route.matched && route.restroom.kind !== "fountain" && (
+              {!route.distance_constraint_satisfied && (
                 <p className="mt-1.5 text-sm text-warning">
-                  Doesn't quite hit your requested distance or restroom range —
-                  closest option found.
+                  Doesn't quite hit your requested distance — closest option
+                  found.
                 </p>
               )}
 
@@ -103,6 +134,26 @@ export default function RouteResults({
                   <li key={fact}>{fact}</li>
                 ))}
               </ul>
+
+              {route.facility_results.length > 0 && (
+                <ul className="my-2 space-y-1 text-sm">
+                  {route.facility_results.map((result) => (
+                    <li
+                      key={result.requirement_id}
+                      className={`flex items-center gap-1.5 ${
+                        result.satisfied ? "text-ink" : "text-ink-muted"
+                      }`}
+                    >
+                      {result.satisfied ? (
+                        <CheckCircle className="h-3.5 w-3.5 shrink-0 text-success" />
+                      ) : (
+                        <XCircle className="h-3.5 w-3.5 shrink-0 text-warning" />
+                      )}
+                      {facilityResultLine(result)}
+                    </li>
+                  ))}
+                </ul>
+              )}
 
               {tradeoff !== null && (
                 <p className="text-sm italic text-ink-muted">{tradeoff}</p>

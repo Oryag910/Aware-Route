@@ -10,7 +10,7 @@ import {
   useMapEvents,
 } from "react-leaflet";
 
-import type { RankedRoute, RestroomInfo } from "../api";
+import type { FacilityResultOut, GenericRoute } from "../api";
 import "leaflet/dist/leaflet.css";
 
 const ROUTE_COLORS = {
@@ -34,34 +34,43 @@ const startIcon = L.divIcon({
   popupAnchor: [0, -34],
 });
 
-const restroomIcon = L.divIcon({
-  className: "aware-marker aware-marker--restroom",
-  html: `
-    <svg width="26" height="26" viewBox="0 0 26 26" xmlns="http://www.w3.org/2000/svg">
-      <circle cx="13" cy="13" r="12" fill="#b8894f" stroke="#f4f1ea" stroke-width="2"/>
+// `dimmed` renders a lower-opacity/desaturated marker for facility_results
+// entries that were found but fell outside the requested mile window
+// (satisfied === false but facility !== null), so unsatisfied stops read
+// as visually distinct from satisfied ones without needing a whole second
+// marker shape.
+function restroomIcon(dimmed: boolean): L.DivIcon {
+  return L.divIcon({
+    className: "aware-marker aware-marker--restroom",
+    html: `
+    <svg width="26" height="26" viewBox="0 0 26 26" xmlns="http://www.w3.org/2000/svg" opacity="${dimmed ? 0.55 : 1}">
+      <circle cx="13" cy="13" r="12" fill="#b8894f" stroke="${dimmed ? "#b8894f" : "#f4f1ea"}" stroke-width="2" stroke-dasharray="${dimmed ? "3,2" : "0"}"/>
       <path d="M9 8.5a1.6 1.6 0 1 1 0-3.2 1.6 1.6 0 0 1 0 3.2Zm8 0a1.6 1.6 0 1 1 0-3.2 1.6 1.6 0 0 1 0 3.2Z" fill="#f4f1ea"/>
       <path d="M7.3 10h3.4c.7 0 1.2.6 1.1 1.3l-.6 6.4a1 1 0 0 1-1 .9H8.8a1 1 0 0 1-1-.9l-.6-6.4A1.1 1.1 0 0 1 7.3 10Z" fill="#f4f1ea"/>
       <path d="M15.3 10h3.4c.6 0 1.1.5 1.1 1.1v4.4c0 .5-.4.9-.9.9h-.3v2.1a.9.9 0 0 1-1.8 0v-2.1h-.3a.9.9 0 0 1-.9-.9v-4.4c0-.6.5-1.1 1.1-1.1Z" fill="#f4f1ea"/>
     </svg>`,
-  iconSize: [26, 26],
-  iconAnchor: [13, 13],
-  popupAnchor: [0, -13],
-});
+    iconSize: [26, 26],
+    iconAnchor: [13, 13],
+    popupAnchor: [0, -13],
+  });
+}
 
-const fountainIcon = L.divIcon({
-  className: "aware-marker aware-marker--fountain",
-  html: `
-    <svg width="26" height="26" viewBox="0 0 26 26" xmlns="http://www.w3.org/2000/svg">
-      <circle cx="13" cy="13" r="12" fill="#4a7fa5" stroke="#f4f1ea" stroke-width="2"/>
+function waterIcon(dimmed: boolean): L.DivIcon {
+  return L.divIcon({
+    className: "aware-marker aware-marker--water",
+    html: `
+    <svg width="26" height="26" viewBox="0 0 26 26" xmlns="http://www.w3.org/2000/svg" opacity="${dimmed ? 0.55 : 1}">
+      <circle cx="13" cy="13" r="12" fill="#4a7fa5" stroke="${dimmed ? "#4a7fa5" : "#f4f1ea"}" stroke-width="2" stroke-dasharray="${dimmed ? "3,2" : "0"}"/>
       <path d="M13 6.5c2.4 3.1 4 5.6 4 7.7a4 4 0 0 1-8 0c0-2.1 1.6-4.6 4-7.7Z" fill="#f4f1ea"/>
     </svg>`,
-  iconSize: [26, 26],
-  iconAnchor: [13, 13],
-  popupAnchor: [0, -13],
-});
+    iconSize: [26, 26],
+    iconAnchor: [13, 13],
+    popupAnchor: [0, -13],
+  });
+}
 
-function amenityIcon(restroom: RestroomInfo): L.DivIcon {
-  return restroom.kind === "fountain" ? fountainIcon : restroomIcon;
+function amenityIcon(kind: FacilityResultOut["kind"], dimmed: boolean): L.DivIcon {
+  return kind === "water" ? waterIcon(dimmed) : restroomIcon(dimmed);
 }
 
 type LocationMarkerProps = {
@@ -70,7 +79,7 @@ type LocationMarkerProps = {
 };
 
 type MapProps = LocationMarkerProps & {
-  routes: RankedRoute[] | null;
+  routes: GenericRoute[] | null;
   selectedRouteIndex: number | null;
   onSelectRoute: (index: number) => void;
 };
@@ -86,7 +95,7 @@ function LocationMarker({ position, onSelect }: LocationMarkerProps) {
 }
 
 /** Pan/zoom to fit the current routes whenever they change. */
-function FitToRoutes({ routes }: { routes: RankedRoute[] | null }) {
+function FitToRoutes({ routes }: { routes: GenericRoute[] | null }) {
   const map = useMap();
 
   useEffect(() => {
@@ -125,7 +134,7 @@ function MapLegend() {
         </span>
         <span className="flex items-center gap-1">
           <span className="inline-block h-2.5 w-2.5 rounded-full bg-[#4a7fa5]" />
-          Fountain
+          Water
         </span>
       </div>
     </div>
@@ -202,7 +211,7 @@ export default function Map({
                 opacity: isSelected ? 1 : 0.75,
                 lineCap: "round",
                 lineJoin: "round",
-                dashArray: route.matched ? undefined : "1, 10",
+                dashArray: route.constraints_satisfied ? undefined : "1, 10",
               }}
               eventHandlers={{
                 click: () => onSelectRoute(index),
@@ -219,16 +228,25 @@ export default function Map({
           ];
         })}
 
-        {routes?.map((route, index) => (
-          <Marker
-            key={`amenity-${index}`}
-            position={[route.restroom.latitude, route.restroom.longitude]}
-            icon={amenityIcon(route.restroom)}
-            opacity={index === selectedRouteIndex ? 1 : 0.55}
-            zIndexOffset={index === selectedRouteIndex ? 1000 : 0}
-            eventHandlers={{ click: () => onSelectRoute(index) }}
-          />
-        ))}
+        {/* Only the selected route's facility stops get markers -- one per
+            facility_results entry that actually found a facility, whether
+            satisfied or not. Unselected routes stay uncluttered (route
+            line only), matching prior behavior. */}
+        {selectedRouteIndex !== null &&
+          routes?.[selectedRouteIndex]?.facility_results.map((result) => {
+            if (result.facility === null) return null;
+            const facility = result.facility;
+
+            return (
+              <Marker
+                key={`facility-${result.requirement_id}`}
+                position={[facility.latitude, facility.longitude]}
+                icon={amenityIcon(result.kind, !result.satisfied)}
+                opacity={result.satisfied ? 1 : 0.7}
+                zIndexOffset={result.satisfied ? 1000 : 500}
+              />
+            );
+          })}
       </MapContainer>
 
       {routes !== null && routes.length > 0 && <MapLegend />}

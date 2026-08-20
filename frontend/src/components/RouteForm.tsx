@@ -1,15 +1,27 @@
 import { useState, type FormEvent } from "react";
 
 import StatusMessage from "./StatusMessage";
+import { X } from "../icons";
 
 export type ElevationPreference = "flat" | "moderate" | "hilly" | "any";
 
 export type RouteShape = "round" | "out_and_back" | "mix";
 
+export type FacilityKind = "restroom" | "water";
+
+export type FacilityMode = "none" | "restroom" | "water" | "both";
+
+export type FacilityRequirementForm = {
+  id: string;
+  kind: FacilityKind;
+  minMile: number;
+  maxMile: number;
+};
+
 export type RouteFormValues = {
   targetDistanceMiles: number;
-  restroomMinMile: number;
-  restroomMaxMile: number;
+  facilityMode: FacilityMode;
+  facilityRequirements: FacilityRequirementForm[];
   elevationPreference: ElevationPreference;
   shape: RouteShape;
   runTime: string;
@@ -22,14 +34,42 @@ type RouteFormProps = {
   isLoading: boolean;
 };
 
+const FACILITY_MODE_OPTIONS: { value: FacilityMode; label: string }[] = [
+  { value: "none", label: "No facilities" },
+  { value: "restroom", label: "Restrooms" },
+  { value: "water", label: "Water" },
+  { value: "both", label: "Restrooms + water" },
+];
+
+const FACILITY_KIND_LABELS: Record<FacilityKind, string> = {
+  restroom: "restroom",
+  water: "water",
+};
+
+let requirementIdCounter = 0;
+
+function makeRequirement(kind: FacilityKind): FacilityRequirementForm {
+  requirementIdCounter += 1;
+  // Default mirrors the old single-restroom-range default (1-4 mi) --
+  // a sensible starting window for either facility kind.
+  return {
+    id: `req-${requirementIdCounter}-${Date.now()}`,
+    kind,
+    minMile: 1,
+    maxMile: 4,
+  };
+}
+
 export default function RouteForm({
   startPosition,
   onSubmit,
   isLoading,
 }: RouteFormProps) {
   const [targetDistanceMiles, setTargetDistanceMiles] = useState("5");
-  const [restroomMinMile, setRestroomMinMile] = useState("1");
-  const [restroomMaxMile, setRestroomMaxMile] = useState("4");
+  const [facilityMode, setFacilityMode] = useState<FacilityMode>("restroom");
+  const [facilityRequirements, setFacilityRequirements] = useState<
+    FacilityRequirementForm[]
+  >([makeRequirement("restroom")]);
   const [elevationPreference, setElevationPreference] =
     useState<ElevationPreference>("moderate");
   const [shape, setShape] = useState<RouteShape>("mix");
@@ -37,38 +77,119 @@ export default function RouteForm({
   const [workoutType, setWorkoutType] = useState("");
   const [formError, setFormError] = useState<string | null>(null);
 
+  function handleModeChange(nextMode: FacilityMode) {
+    setFacilityMode(nextMode);
+
+    // Ensure the modes that need rows always have at least one, seeding a
+    // default row the first time a kind becomes visible. Existing rows of
+    // any kind are kept in state even when hidden (e.g. switching "both"
+    // -> "restroom" doesn't delete the water rows) -- they're simply
+    // filtered out of what gets submitted, based on the active mode at
+    // submit time. This keeps mode-switching cheap and avoids ever losing
+    // a user's in-progress edits by mistake.
+    setFacilityRequirements((current) => {
+      let next = current;
+
+      const needsRestroom =
+        nextMode === "restroom" || nextMode === "both";
+      const needsWater = nextMode === "water" || nextMode === "both";
+
+      if (needsRestroom && !next.some((r) => r.kind === "restroom")) {
+        next = [...next, makeRequirement("restroom")];
+      }
+      if (needsWater && !next.some((r) => r.kind === "water")) {
+        next = [...next, makeRequirement("water")];
+      }
+
+      return next;
+    });
+  }
+
+  function handleAddRequirement(kind: FacilityKind) {
+    setFacilityRequirements((current) => [...current, makeRequirement(kind)]);
+  }
+
+  function handleRemoveRequirement(id: string) {
+    setFacilityRequirements((current) => {
+      const target = current.find((r) => r.id === id);
+      const withoutTarget = current.filter((r) => r.id !== id);
+
+      // In "both" mode, never let a kind drop to zero rows silently --
+      // re-seed a default row for that kind instead of leaving a mode
+      // that claims to require both restroom and water stops with none
+      // of one kind.
+      if (
+        facilityMode === "both" &&
+        target !== undefined &&
+        !withoutTarget.some((r) => r.kind === target.kind)
+      ) {
+        return [...withoutTarget, makeRequirement(target.kind)];
+      }
+
+      return withoutTarget;
+    });
+  }
+
+  function handleRequirementChange(
+    id: string,
+    field: "minMile" | "maxMile",
+    value: string,
+  ) {
+    setFacilityRequirements((current) =>
+      current.map((requirement) =>
+        requirement.id === id
+          ? { ...requirement, [field]: Number(value) }
+          : requirement,
+      ),
+    );
+  }
+
+  function activeRequirements(): FacilityRequirementForm[] {
+    if (facilityMode === "none") return [];
+    if (facilityMode === "both") return facilityRequirements;
+    return facilityRequirements.filter((r) => r.kind === facilityMode);
+  }
+
   function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
 
     const distance = Number(targetDistanceMiles);
-    const minMile = Number(restroomMinMile);
-    const maxMile = Number(restroomMaxMile);
 
     if (!(distance > 0)) {
       setFormError("Target distance must be greater than 0.");
       return;
     }
 
-    if (!(maxMile > 0)) {
-      setFormError("Maximum restroom mile must be greater than 0.");
-      return;
-    }
+    const requirements = activeRequirements();
 
-    if (minMile > maxMile) {
-      setFormError("Minimum restroom mile cannot be greater than maximum mile.");
-      return;
-    }
+    for (const requirement of requirements) {
+      const kindLabel = FACILITY_KIND_LABELS[requirement.kind];
 
-    if (maxMile > distance) {
-      setFormError("Restroom range must fall within the route distance.");
-      return;
+      if (!(requirement.minMile >= 0)) {
+        setFormError(`Minimum ${kindLabel} mile cannot be negative.`);
+        return;
+      }
+
+      if (!(requirement.maxMile > requirement.minMile)) {
+        setFormError(
+          `Maximum ${kindLabel} mile must be greater than the minimum mile.`,
+        );
+        return;
+      }
+
+      if (requirement.maxMile > distance) {
+        setFormError(
+          `Requested ${kindLabel} range must fall within the route distance.`,
+        );
+        return;
+      }
     }
 
     setFormError(null);
     onSubmit({
       targetDistanceMiles: distance,
-      restroomMinMile: minMile,
-      restroomMaxMile: maxMile,
+      facilityMode,
+      facilityRequirements: requirements,
       elevationPreference,
       shape,
       runTime,
@@ -80,6 +201,89 @@ export default function RouteForm({
   const subLabelClass = "block text-xs text-ink-muted mb-1";
   const controlClass =
     "w-full rounded-lg border border-border bg-surface px-3 py-2 text-sm text-ink placeholder:text-ink-muted transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/40 focus-visible:border-primary";
+
+  const showRestroomRows =
+    facilityMode === "restroom" || facilityMode === "both";
+  const showWaterRows = facilityMode === "water" || facilityMode === "both";
+
+  function renderRequirementRows(kind: FacilityKind) {
+    const rows = facilityRequirements.filter((r) => r.kind === kind);
+    const kindLabel = FACILITY_KIND_LABELS[kind];
+
+    return (
+      <div className="space-y-2">
+        {rows.map((requirement, index) => (
+          <div key={requirement.id} className="grid grid-cols-[1fr_1fr_auto] gap-2">
+            <div>
+              <label
+                htmlFor={`${kind}-min-mile-${requirement.id}`}
+                className={subLabelClass}
+              >
+                Min mile
+              </label>
+              <input
+                id={`${kind}-min-mile-${requirement.id}`}
+                type="number"
+                min="0"
+                step="0.1"
+                value={requirement.minMile}
+                onChange={(event) =>
+                  handleRequirementChange(
+                    requirement.id,
+                    "minMile",
+                    event.target.value,
+                  )
+                }
+                required
+                className={controlClass}
+              />
+            </div>
+            <div>
+              <label
+                htmlFor={`${kind}-max-mile-${requirement.id}`}
+                className={subLabelClass}
+              >
+                Max mile
+              </label>
+              <input
+                id={`${kind}-max-mile-${requirement.id}`}
+                type="number"
+                min="0.1"
+                step="0.1"
+                value={requirement.maxMile}
+                onChange={(event) =>
+                  handleRequirementChange(
+                    requirement.id,
+                    "maxMile",
+                    event.target.value,
+                  )
+                }
+                required
+                className={controlClass}
+              />
+            </div>
+            <div className="flex items-end">
+              <button
+                type="button"
+                onClick={() => handleRemoveRequirement(requirement.id)}
+                aria-label={`Remove ${kindLabel} stop ${index + 1}`}
+                className="inline-flex h-[38px] w-[38px] items-center justify-center rounded-lg border border-border text-ink-muted transition-colors hover:border-danger/50 hover:text-danger focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/40"
+              >
+                <X className="h-4 w-4" />
+              </button>
+            </div>
+          </div>
+        ))}
+        <button
+          type="button"
+          onClick={() => handleAddRequirement(kind)}
+          className="text-sm font-semibold text-primary hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/40 rounded"
+        >
+          + Add {kindLabel}
+        </button>
+      </div>
+    );
+  }
 
   return (
     <form onSubmit={handleSubmit} className="space-y-4">
@@ -121,39 +325,47 @@ export default function RouteForm({
         </div>
 
         <fieldset className="sm:col-span-2 m-0 min-w-0 border-0 p-0">
-          <legend className={labelClass}>Restroom mile range</legend>
-          <div className="grid grid-cols-2 gap-3">
-            <div>
-              <label htmlFor="restroom-min-mile" className={subLabelClass}>
-                Min mile
-              </label>
-              <input
-                id="restroom-min-mile"
-                type="number"
-                min="0"
-                step="0.1"
-                value={restroomMinMile}
-                onChange={(event) => setRestroomMinMile(event.target.value)}
-                required
-                className={controlClass}
-              />
-            </div>
-            <div>
-              <label htmlFor="restroom-max-mile" className={subLabelClass}>
-                Max mile
-              </label>
-              <input
-                id="restroom-max-mile"
-                type="number"
-                min="0.1"
-                step="0.1"
-                value={restroomMaxMile}
-                onChange={(event) => setRestroomMaxMile(event.target.value)}
-                required
-                className={controlClass}
-              />
-            </div>
+          <legend className={labelClass}>Requested stops</legend>
+
+          <div
+            role="radiogroup"
+            aria-label="Facility requirements"
+            className="grid grid-cols-2 gap-2 sm:grid-cols-4"
+          >
+            {FACILITY_MODE_OPTIONS.map((option) => (
+              <button
+                key={option.value}
+                type="button"
+                role="radio"
+                aria-checked={facilityMode === option.value}
+                onClick={() => handleModeChange(option.value)}
+                className={`rounded-lg border px-3 py-2 text-sm font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/40 ${
+                  facilityMode === option.value
+                    ? "border-primary bg-primary/10 text-primary"
+                    : "border-border bg-surface text-ink-muted hover:border-primary/50"
+                }`}
+              >
+                {option.label}
+              </button>
+            ))}
           </div>
+
+          {(showRestroomRows || showWaterRows) && (
+            <div className="mt-3 space-y-4">
+              {showRestroomRows && (
+                <div>
+                  <p className={subLabelClass}>Restroom mile ranges</p>
+                  {renderRequirementRows("restroom")}
+                </div>
+              )}
+              {showWaterRows && (
+                <div>
+                  <p className={subLabelClass}>Water mile ranges</p>
+                  {renderRequirementRows("water")}
+                </div>
+              )}
+            </div>
+          )}
         </fieldset>
 
         <div>
