@@ -7,9 +7,13 @@ including the 4 hard-case scenarios that are also round/non-amenity).
 This is the only subset where the comparison is actually apples-to-
 apples:
 
-  - V1 = `app.generation.engine.generate_candidates(shape="round")`,
-    the existing turnaround-based generator (`round_route.py` +
-    `length_tune.py`'s spur-based tuner).
+  - V1 = `app.generation.engine._tuned_pairs` called directly (NOT via
+    `engine.generate_candidates` -- since PR #16 that wrapper routes
+    through `generate_routes`'s `ROUND_GENERATOR`-gated "round"
+    branch, which defaults to the polygon generator; going through it
+    here would make "V1" silently run V2 too), the original
+    turnaround-based generator (`round_route.py` + `length_tune.py`'s
+    spur-based tuner).
   - V2 = `app.generation.engine.generate_polygon_loop_candidates()`,
     PR #15's multi-anchor polygon-loop generator (`polygon_loop.py`).
 
@@ -48,7 +52,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Literal
 
-from app.generation.engine import generate_candidates, generate_polygon_loop_candidates
+from app.generation.engine import _tuned_pairs, generate_polygon_loop_candidates
+from app.graph.distances import nearest_node, single_source_paths
 from app.graph.loader import get_graph
 from app.routing.provider import Coordinate, RouteCandidate
 from scripts.benchmark_scenarios import SCENARIOS, Scenario
@@ -107,9 +112,20 @@ def _run_generator(
     try:
         start_time = time.monotonic()
         if generator == "v1":
-            candidates: list[RouteCandidate] = generate_candidates(
-                graph, start, target_m, "round", COUNT
-            )
+            # Call engine._tuned_pairs directly rather than through
+            # engine.generate_candidates -- that wrapper now routes
+            # through generate_routes's `ROUND_GENERATOR`-gated "round"
+            # branch (PR #16), which defaults to the polygon
+            # generator. Going through it here would make the "V1"
+            # arm of this comparison silently run V2 too whenever the
+            # environment doesn't override the flag. `_tuned_pairs` is
+            # the exact same length-tuned V1 `round_pairs` call
+            # `generate_candidates` used before PR #16 flipped the
+            # default.
+            start_node = nearest_node(graph, start)
+            dists, paths = single_source_paths(graph, start_node)
+            pairs = _tuned_pairs(graph, start_node, dists, "round", target_m, COUNT, paths)
+            candidates: list[RouteCandidate] = [candidate for candidate, _node_path in pairs]
         else:
             candidates = generate_polygon_loop_candidates(
                 graph, start, target_m, COUNT
@@ -355,10 +371,12 @@ def build_report(comparisons: list[ScenarioComparison]) -> str:
     )
     lines.append("")
     lines.append(
-        "V1 = `engine.generate_candidates(shape=\"round\")` (turnaround "
-        "generator). V2 = `engine.generate_polygon_loop_candidates()` "
-        "(PR #15 multi-anchor polygon-loop generator). Both scored with "
-        "the identical `scripts.benchmark_suite._build_candidate_report` "
+        "V1 = `engine._tuned_pairs` called directly (turnaround "
+        "generator; bypasses the `ROUND_GENERATOR` flag on purpose -- "
+        "see module docstring). V2 = "
+        "`engine.generate_polygon_loop_candidates()` (PR #15 "
+        "multi-anchor polygon-loop generator). Both scored with the "
+        "identical `scripts.benchmark_suite._build_candidate_report` "
         "used by the PR #14 baseline."
     )
     lines.append("")
