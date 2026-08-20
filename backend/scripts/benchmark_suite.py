@@ -43,6 +43,7 @@ from app.amenities.fountains import fountain_to_amenity, get_fountains
 from app.amenities.snapping import SnappedAmenity, amenities_in_range, snap_amenities
 from app.flow.shape import sharp_turn_count, u_turn_count
 from app.generation.engine import generate_amenity_aware, generate_candidates
+from app.generation import shape_metrics
 from app.graph.distances import nearest_node, single_source_distances
 from app.graph.loader import get_graph
 from app.graph.model import node_coordinate
@@ -169,6 +170,14 @@ class CandidateReport:
     repeated_ratio: float
     defects: DefectFlags
     passes_amenity: bool | None  # None if amenity not required
+    # Loop-quality observability (PR #14) -- descriptive metrics only,
+    # no pass/fail gate. See app.generation.shape_metrics for
+    # definitions.
+    max_start_distance_m: float
+    radial_exposure: float
+    isoperimetric_quotient: float
+    elongation_ratio: float
+    sharp_turns_per_km: float
 
 
 @dataclass(frozen=True)
@@ -372,6 +381,9 @@ def _build_candidate_report(
         disconnected=not _connectivity_ok(candidate),
     )
 
+    km = candidate.distance_m / 1000.0
+    sharp_turns_per_km = sharp_turns / km if km > 0 else 0.0
+
     return CandidateReport(
         distance_m=candidate.distance_m,
         distance_error_m=distance_error_m,
@@ -381,6 +393,11 @@ def _build_candidate_report(
         repeated_ratio=repeated_ratio,
         defects=defects,
         passes_amenity=passes_amenity,
+        max_start_distance_m=shape_metrics.max_start_distance_m(candidate.geometry),
+        radial_exposure=shape_metrics.radial_exposure(candidate.geometry, candidate.distance_m),
+        isoperimetric_quotient=shape_metrics.isoperimetric_quotient(candidate.geometry),
+        elongation_ratio=shape_metrics.elongation_ratio(candidate.geometry),
+        sharp_turns_per_km=sharp_turns_per_km,
     )
 
 
@@ -510,6 +527,41 @@ def _shape_quality(ok_results: list[ScenarioResult], shape: str) -> ShapeQuality
         distinct_alternative_pct=distinct_pct,
         distinct_alternative_count=len(distinct),
     )
+
+
+# Loop-quality observability (PR #14) -- descriptive metric summaries
+# only, no pass/fail gate. See app.generation.shape_metrics for metric
+# definitions; thresholds for Polygon Loop V2 (PR #15) will be chosen
+# from these empirical distributions.
+_LOOP_GEOMETRY_METRICS: tuple[tuple[str, str, str], ...] = (
+    ("max_start_distance_m", "max_start_distance_m (m)", "{:.0f}"),
+    ("radial_exposure", "radial_exposure", "{:.3f}"),
+    ("isoperimetric_quotient", "isoperimetric_quotient", "{:.3f}"),
+    ("elongation_ratio", "elongation_ratio", "{:.2f}"),
+    ("sharp_turns_per_km", "sharp_turns_per_km", "{:.2f}"),
+)
+
+
+def _loop_geometry_table(candidates: list[CandidateReport]) -> list[str]:
+    if not candidates:
+        return ["_no candidates_", ""]
+
+    lines = [
+        "| metric | median | p90 | p95 | min | max |",
+        "|---|---|---|---|---|---|",
+    ]
+    for attr, label, fmt in _LOOP_GEOMETRY_METRICS:
+        values = [getattr(c, attr) for c in candidates]
+        median = statistics.median(values)
+        p90 = _percentile(values, 90.0)
+        p95 = _percentile(values, 95.0)
+        lines.append(
+            f"| {label} | {fmt.format(median)} | {fmt.format(p90)} | "
+            f"{fmt.format(p95)} | {fmt.format(min(values))} | "
+            f"{fmt.format(max(values))} |"
+        )
+    lines.append("")
+    return lines
 
 
 def build_report(results: list[ScenarioResult]) -> str:
@@ -775,6 +827,60 @@ def build_report(results: list[ScenarioResult]) -> str:
             f"{distinct_str} |"
         )
     lines.append("")
+
+    lines.append("## Loop geometry baseline")
+    lines.append("")
+    lines.append(
+        "Descriptive geometry metrics (PR #14, loop-quality observability) "
+        "-- establishing a baseline before replacing the round-route "
+        "generator; **no pass/fail gate, no production behavior change**. "
+        "See `app.generation.shape_metrics` for exact metric definitions."
+    )
+    lines.append("")
+    lines.append(
+        "- `max_start_distance_m`: farthest straight-line distance from "
+        "the route's start point to any point on the route."
+    )
+    lines.append(
+        "- `radial_exposure`: max_start_distance_m / candidate.distance_m "
+        "-- how far the runner ever gets from home, relative to how far "
+        "they actually ran. A straight-out-and-back run scores ~0.5; a "
+        "broad loop that stays close to home scores much lower."
+    )
+    lines.append(
+        "- `isoperimetric_quotient`: compactness (4*pi*Area/Perimeter^2), "
+        "0..1, 1.0 for a circle, near 0 for thin/linear shapes."
+    )
+    lines.append(
+        "- `elongation_ratio`: rotation-invariant PCA aspect ratio of the "
+        "route footprint, ~1.0 = balanced/square-like, larger = more "
+        "elongated/linear."
+    )
+    lines.append(
+        "- `sharp_turns_per_km`: sharp-turn rate normalized by route "
+        "distance (see `app.flow.shape.sharp_turn_count`)."
+    )
+    lines.append(
+        "- `short_start_return_spur` rate (tuner-prepended out-and-back "
+        "spur) is reported per-shape in the Shape-specific quality table "
+        "above."
+    )
+    lines.append("")
+    lines.append(f"### All shapes ({total_candidates} candidates)")
+    lines.append("")
+    lines.extend(_loop_geometry_table(all_candidates))
+    for shape in REPORT_SHAPES:
+        shape_candidates = [
+            c for r in ok_results if r.scenario.shape == shape for c in r.candidates
+        ]
+        lines.append(f"### {shape} ({len(shape_candidates)} candidates)")
+        lines.append("")
+        lines.extend(_loop_geometry_table(shape_candidates))
+        lines.append(
+            f"- short_start_return_spur rate: "
+            f"{shape_quality[shape].short_start_return_spur_pct:.1f}%"
+        )
+        lines.append("")
 
     if failed_results:
         lines.append("## Failed scenarios")
