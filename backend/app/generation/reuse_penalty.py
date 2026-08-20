@@ -24,6 +24,39 @@ def _reuse_penalty_weight(
     return weight
 
 
+def edge_pairs(node_path: list[int]) -> set[frozenset[int]]:
+    """Undirected edge set implied by consecutive hops in `node_path`."""
+    return {frozenset((u, v)) for u, v in zip(node_path, node_path[1:])}
+
+
+def reuse_penalized_path(
+    graph: Any,
+    source: int,
+    target: int,
+    used_pairs: set[frozenset[int]],
+    penalty: float = REUSE_PENALTY,
+) -> list[int] | None:
+    """Shortest path source -> target that avoids reusing any edge in
+    `used_pairs` where an alternative exists. None if unreachable.
+
+    General form of `reuse_penalized_return_path` -- source/target and
+    the already-used edge set are caller-supplied instead of being
+    fixed to "turnaround -> start avoiding the outbound leg", so a
+    multi-leg generator (e.g. a polygon loop) can penalize every prior
+    leg's edges when routing each subsequent one.
+    """
+    try:
+        path: list[int] = nx.shortest_path(
+            graph,
+            source,
+            target,
+            weight=_reuse_penalty_weight(used_pairs, penalty),
+        )
+    except nx.NetworkXNoPath:
+        return None
+    return path
+
+
 def reuse_penalized_return_path(
     graph: Any,
     turnaround: int,
@@ -33,16 +66,6 @@ def reuse_penalized_return_path(
 ) -> list[int] | None:
     """Shortest path turnaround -> start that avoids reusing outbound
     edges where an alternative exists. None if unreachable."""
-    outbound_pairs = {
-        frozenset((u, v)) for u, v in zip(outbound, outbound[1:])
-    }
-    try:
-        path: list[int] = nx.shortest_path(
-            graph,
-            turnaround,
-            start_node,
-            weight=_reuse_penalty_weight(outbound_pairs, penalty),
-        )
-    except nx.NetworkXNoPath:
-        return None
-    return path
+    return reuse_penalized_path(
+        graph, turnaround, start_node, edge_pairs(outbound), penalty
+    )

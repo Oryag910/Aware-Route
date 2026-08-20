@@ -4,6 +4,7 @@ from app.amenities.snapping import SnappedAmenity
 from app.generation.amenity_first import through_amenities_pairs
 from app.generation.length_tune import tune_generator_pairs_to_target
 from app.generation.out_and_back import out_and_back_pairs
+from app.generation.polygon_loop import polygon_loop_pairs
 from app.generation.round_route import round_pairs
 from app.generation.routes import GeneratedRoute, compute_quality
 from app.graph.distances import nearest_node, single_source_paths
@@ -223,6 +224,28 @@ def generate_amenity_aware(
         max_range_m=max_range_m,
     )
     return [route.candidate for route in routes]
+
+
+def generate_polygon_loop_candidates(
+    graph: Any,
+    start: Coordinate,
+    target_distance_m: float,
+    count: int,
+) -> list[RouteCandidate]:
+    """V2 experimental generator (PR #15): a multi-anchor polygon-loop
+    round-route generator, offered alongside V1's turnaround-based
+    `generate_candidates(..., shape="round")` for side-by-side
+    benchmarking (see scripts/benchmark_polygon_loop.py). This is a
+    standalone entry point, not a `shape` option -- `generate_routes`/
+    `generate_candidates`/`generate_amenity_aware` (V1, including the
+    "mix" and amenity-aware pools) are completely unchanged and keep
+    using V1 `round_pairs`. Production does not call this function
+    until V2 is validated against the V1 baseline.
+    """
+    start_node = nearest_node(graph, start)
+    _dists, paths = single_source_paths(graph, start_node)
+    pairs = polygon_loop_pairs(graph, start_node, target_distance_m, count, paths)
+    return [candidate for candidate, _node_path in pairs]
 
 
 def _dedup_routes(routes: list[GeneratedRoute]) -> list[GeneratedRoute]:
