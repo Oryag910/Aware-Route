@@ -284,12 +284,12 @@ def generate_polygon_loop_candidates(
 
     Standalone entry point used directly by
     scripts/benchmark_polygon_loop.py for side-by-side V1-vs-V2
-    comparison. As of PR #16, `generate_routes`'s `shape == "round"`
-    branch also calls `polygon_loop_pairs` directly (this function's
-    own implementation, inlined) by default -- see
-    `_round_generator_version`. "mix" and "out_and_back" are
-    unaffected and keep using V1 `round_pairs`/`out_and_back_pairs`
-    unconditionally.
+    comparison. `generate_routes`'s `shape == "round"` branch also
+    calls `polygon_loop_pairs` directly (this function's own
+    implementation, inlined) when `ROUND_GENERATOR=polygon` is set
+    explicitly -- see `_round_generator_version`. The default remains
+    V1; "mix" and "out_and_back" are unaffected regardless of the flag
+    and always keep using V1 `round_pairs`/`out_and_back_pairs`.
     """
     start_node = nearest_node(graph, start)
     _dists, paths = single_source_paths(graph, start_node)
@@ -313,13 +313,13 @@ def generate_polygon_loop_amenity_candidates(
 
     Standalone entry point used directly by
     scripts/benchmark_polygon_amenity.py for side-by-side V1-vs-V2
-    comparison. As of this PR, `generate_routes`'s `shape == "round"`
-    amenity-aware branch also calls
-    `polygon_loop_through_amenities_pairs` (this function's own
-    implementation, inlined) by default -- see
-    `_round_generator_version`. "mix" and "out_and_back" are
-    unaffected and keep using V1 `through_amenities_pairs`
-    unconditionally.
+    comparison. `generate_routes`'s `shape == "round"` amenity-aware
+    branch also calls `polygon_loop_through_amenities_pairs` (this
+    function's own implementation, inlined) when
+    `ROUND_GENERATOR=polygon` is set explicitly -- see
+    `_round_generator_version`. The default remains V1; "mix" and
+    "out_and_back" are unaffected regardless of the flag and always
+    keep using V1 `through_amenities_pairs`.
     """
     triples = polygon_loop_through_amenities_pairs(
         graph, start, target_distance_m, snapped, min_range_m, max_range_m, count

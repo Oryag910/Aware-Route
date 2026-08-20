@@ -11,17 +11,21 @@ synthetic rectangle corners (see `polygon_template.py`) snapped onto
 the walk graph. The goal is a broad, closed footprint rather than one
 turnaround and a detour home.
 
-As of PR #16, this is the DEFAULT generator for explicit
-`shape="round"` local requests -- `engine.generate_routes` calls into
-this module for "round" (both the ordinary and amenity-aware pools,
-see `polygon_amenity.py`) unless `ROUND_GENERATOR=v1` is set (rollback
-to the original turnaround-based generator, still fully intact and
-unchanged -- see `engine._round_generator_version`). "mix" and
+As of PR #16, this generator is fully integrated for explicit
+`shape="round"` local requests, but is OPT-IN, not the default --
+`engine.generate_routes` only calls into this module for "round" (both
+the ordinary and amenity-aware pools, see `polygon_amenity.py`) when
+`ROUND_GENERATOR=polygon` is set explicitly (see
+`engine._round_generator_version`). The default remains V1 (the
+original turnaround-based generator, still fully intact and
+unchanged): the polygon-enabled full-suite p95 latency did not clear
+the project's existing <2.0s benchmark gate, so PR #16 lands the
+validated architecture without flipping production behavior. "mix" and
 "out_and_back" are unaffected by this module and the `ROUND_GENERATOR`
-flag; they always use V1's `round_pairs`/`out_and_back_pairs`. See
-scripts/benchmark_polygon_loop.py and
-scripts/benchmark_polygon_amenity.py for the V1-vs-V2 validation this
-default switch was based on.
+flag regardless of its value; they always use V1's
+`round_pairs`/`out_and_back_pairs`. See scripts/benchmark_polygon_loop.py
+and scripts/benchmark_polygon_amenity.py for the V1-vs-V2 validation
+this opt-in path was based on.
 """
 
 from collections.abc import Callable
