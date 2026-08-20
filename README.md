@@ -65,30 +65,47 @@ This is the core of the project, not a wrapper around a third-party directions A
 
 The backend ships with two deterministic local-engine benchmarks.
 
-**Legacy no-facility/single-fountain suite** (537 scenarios, unchanged by the multi-facility work below — the ordinary no-facility candidate generation code it exercises is byte-for-byte untouched): [`backend/benchmarks/local/report_20260820_174310.md`](backend/benchmarks/local/report_20260820_174310.md).
+**Legacy no-facility/single-fountain suite** (537 scenarios, unchanged by the multi-facility work below — the ordinary no-facility candidate generation code it exercises is byte-for-byte untouched). Re-run alone, with no other process competing for CPU, for a clean measurement: [`backend/benchmarks/local/report_20260820_185555.md`](backend/benchmarks/local/report_20260820_185555.md).
 
 | Metric | Result |
 |---|---|
 | Scenarios with ≥1 route within ±100 m of target | **537 / 537** |
 | Disconnected candidates | **0** |
-| Median local route generation time | **~0.27 s** |
-| p95 local route generation time | **~1.48 s** (< 2.0 s production gate) |
+| Median local route generation time | **0.245 s** |
+| p95 local route generation time | **1.290 s** — identical to the pre-branch baseline (< 2.0 s production gate) |
+| Max local route generation time | **2.367 s** |
 | Offline bundled-fountain placement checks | **268 / 268** |
 
-The 537/537 figure is scenario-level success (at least one qualifying route per scenario). The fountain-placement figure validates against the offline bundled fountain dataset, not live Supabase restroom data — see the report for the full defect-rate and diversity breakdown.
+The 537/537 figure is scenario-level success (at least one qualifying route per scenario). An earlier rerun of this benchmark showed a higher p95 (1.482s) while sharing the machine with two other CPU-heavy background jobs; this clean, isolated rerun's p95 matches the original baseline exactly, confirming that delta was measurement noise, not a regression.
 
-**New generic facility-routing benchmark** (`scripts/benchmark_facilities.py`, a separate suite that does not replace the one above): synthetic facility fixtures derived from a real reference route's own geometry at the target mile marker (proves the mechanism can honor a given cumulative-mile stop, independent of where real-world restrooms/water happen to sit), across distance × shape × requirement-count × composition axes, 180 scenarios. Full report: [`backend/benchmarks/facilities/report_20260820_174951.md`](backend/benchmarks/facilities/report_20260820_174951.md).
+**New generic facility-routing benchmark** (`scripts/benchmark_facilities.py`, a separate suite that does not replace the one above), 201 scenarios across three strata, run alone for clean timing. Full report: [`backend/benchmarks/facilities/report_20260820_191140.md`](backend/benchmarks/facilities/report_20260820_191140.md).
 
-| Requirement count | Fully constraint-valid | Per-requirement satisfaction | Median latency* |
+Every latency figure below is exactly **one** end-to-end `plan_routes` call with the production-default constrained planners — the same call a real `POST /routes` request makes. A separate natural-match-only diagnostic call (used only to measure how often natural matching alone would have sufficed) is timed independently and never folded into these numbers.
+
+**Stratum A — mechanism/correctness** (synthetic fixtures placed exactly where a real reference route's own geometry passes at the target mile marker — proves the encounter/assignment/scoring *mechanism* can honor a cumulative-mile stop):
+
+| Requirement count | Fully constraint-valid | Per-requirement satisfaction | Median latency |
 |---|---|---|---|
-| 0 | 18/18 | n/a | 0.61s |
-| 1 | 54/54 | 100.0% | 1.86s |
-| 2 | 54/54 | 100.0% | 2.01s |
-| 3-4 | 51/54 (94.4%) | 94.4% | 3.70s |
+| 0 | 9/9 | n/a | 0.28s |
+| 1 | 27/27 | 100.0% | 1.44s |
+| 2 | 27/27 | 100.0% | 1.51s |
+| 3-4 | 24/27 (88.9%) | 88.9% | 3.03s |
+| 5-6 | 21/27 (77.8%) | 85.2% | 2.64s |
 
-\* Every latency figure here is ~2x a single production `/routes` call — this benchmark calls the planner twice per scenario (natural-match-only, then with constrained planners) to also measure how often each path is needed. Real single-call no-facility production latency is the legacy benchmark's ~0.27s median above, unaffected by this branch. Across all 162 scenarios with requirements: natural matching alone was sufficient **90.7%** of the time; the constrained planners were needed and succeeded another **7.4%**; **1.9%** still fell short of full validity even after the constrained planners ran (labeled `constraints_satisfied=false`, never silently upgraded).
+**Stratum B — planner-stress** (facility fixtures placed at real graph nodes near the requested cumulative distance's *radial* position rather than on any ordinary candidate's own path, and explicitly rejected/re-picked if a natural pool already covers them — this is the number that actually measures whether the constrained planners pull their weight, not Stratum A's, since Stratum A's fixtures are natural-match-friendly by construction):
 
-This benchmark validates the mechanism against synthetic, graph-derived fixtures (STRATUM A) — it does not measure how often real-world restroom/water data happens to support a given request (restrooms are live-Supabase-only and are not represented offline here). The four canonical product scenarios from the project spec are automated as integration tests in [`backend/tests/test_canonical_scenarios.py`](backend/tests/test_canonical_scenarios.py) and pass against the real committed graph with injected, deterministic facility fixtures, with full requirement satisfaction.
+| Requirement count | Fully constraint-valid | Constrained planner needed & recovered | Median latency |
+|---|---|---|---|
+| 1 | 18/18 (100%) | 18/18 (100%) | 2.87s |
+| 2 | 0/18 (0%) | 0/18 (0%) | 7.26s |
+| 3-4 | 0/18 (0%) | 0/18 (0%) | 11.86s |
+| 5-6 | 0/18 (0%) | 0/18 (0%) | up to 19.03s |
+
+The constrained planners reliably recover a **single** genuinely-hard (non-naturally-covered) requirement, but **0% of the time** with 2 or more simultaneously — verified by manual inspection, not assumed: the top-ranked candidate in these cases is a distance-accurate natural match satisfying nothing, while the constrained planner's best attempt reaches one of the requested facilities only by blowing past the distance target by roughly 2x. The scorer's own priority order (distance-within-tolerance ranks above requirement-satisfaction count, per this project's own spec) correctly keeps the accurate-but-unsatisfying route on top rather than surfacing a wildly-off-distance partial match — this is the scorer working as designed, not a planner bug, and it honestly reveals the current bounded beam-search planners' real capability ceiling on hard multi-stop requests. See the full report for the exact reproduction.
+
+**Stratum C — real committed water-dataset coverage** (no synthetic placement at all — the actual bundled OSM water extract, deterministic starts, water-only): **12/12** scenarios fully satisfied, **18/18** individual water requirements found (median 3.9s). This is a small, deliberately narrow sample (2 starts × 3 distances × 1-2 requirements) — a coverage measurement, not a claim about geography elsewhere in Manhattan. Restrooms are live-Supabase-only and are not represented in any offline/committed benchmark.
+
+The four canonical product scenarios from the project spec are automated as integration tests in [`backend/tests/test_canonical_scenarios.py`](backend/tests/test_canonical_scenarios.py) and pass against the real committed graph with injected, deterministic facility fixtures, with full requirement satisfaction.
 
 ## Tech stack
 
@@ -151,6 +168,6 @@ GitHub Actions runs on every PR and push to `main`:
 - Public restroom data can be incomplete, outdated, or wrong about hours/availability.
 - Water-fountain data is a static, committed OSM extract — no live "closed for the season"/maintenance signal.
 - Routes are distance-tuned within a tolerance, not guaranteed-exact.
-- Requests with several simultaneous facility requirements (especially requirements spread across most of the route) are honest best-effort: the constrained planners are a bounded heuristic search on real, non-uniform street topology, not a guarantee every request is fully satisfiable — a route with unmet requirements is always returned as `constraints_satisfied=false`, never silently upgraded. See `backend/benchmarks/facilities/` for measured satisfaction rates by requirement count.
+- Requests with several simultaneous facility requirements are honest best-effort, and — measured, not hand-waved — meaningfully weaker than a single hard requirement: the Stratum B planner-stress benchmark shows the constrained planners recover a single genuinely-hard (non-naturally-satisfiable) requirement 100% of the time, but 0% of the time with 2 or more simultaneously, because the scorer correctly refuses to sacrifice distance accuracy for partial facility credit (see `backend/benchmarks/facilities/` for the full breakdown and a verified explanation, not a guess). A route with unmet requirements is always returned as `constraints_satisfied=false`, never silently upgraded. Improving multi-hard-requirement recovery would need real planner/search work (larger budgets, smarter joint placement), not just tuning constants.
 - No live turn-by-turn navigation or run tracking.
 - The benchmark validates graph-network routing correctness and offline fountain placement; it does not independently verify every crossing, ferry, or water-adjacency condition beyond what the committed walk graph encodes.
