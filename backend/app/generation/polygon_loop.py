@@ -11,15 +11,24 @@ synthetic rectangle corners (see `polygon_template.py`) snapped onto
 the walk graph. The goal is a broad, closed footprint rather than one
 turnaround and a detour home.
 
-This is an experimental V2 generator offered ALONGSIDE V1, not a
-replacement -- see `engine.generate_polygon_loop_candidates`. Nothing
-in `engine.generate_candidates` / `generate_routes` /
-`generate_amenity_aware` (V1's public entry points, including the
-"mix" and amenity-aware pools) calls into this module; V1 remains the
-only generator wired into production route generation until this V2
-path is validated by benchmark (see scripts comparing V1 vs V2).
+As of PR #16, this generator is fully integrated for explicit
+`shape="round"` local requests, but is OPT-IN, not the default --
+`engine.generate_routes` only calls into this module for "round" (both
+the ordinary and amenity-aware pools, see `polygon_amenity.py`) when
+`ROUND_GENERATOR=polygon` is set explicitly (see
+`engine._round_generator_version`). The default remains V1 (the
+original turnaround-based generator, still fully intact and
+unchanged): the polygon-enabled full-suite p95 latency did not clear
+the project's existing <2.0s benchmark gate, so PR #16 lands the
+validated architecture without flipping production behavior. "mix" and
+"out_and_back" are unaffected by this module and the `ROUND_GENERATOR`
+flag regardless of its value; they always use V1's
+`round_pairs`/`out_and_back_pairs`. See scripts/benchmark_polygon_loop.py
+and scripts/benchmark_polygon_amenity.py for the V1-vs-V2 validation
+this opt-in path was based on.
 """
 
+from collections.abc import Callable
 from math import cos, radians
 from typing import Any
 
@@ -95,6 +104,69 @@ MAX_CORRECTION_ATTEMPTS = 4  # extra rebuilds beyond the initial calibrated atte
 MAX_EDGE_REUSE_RATIO = 0.2
 
 
+#: A loop waypoint is either a synthetic coordinate that still needs
+#: snapping to the graph (`Coordinate`) or an already-known graph node
+#: id that must be used as-is (`int` -- e.g. an amenity's snapped
+#: node). `polygon_amenity.py` inserts an `int` waypoint into the
+#: sequence below to route THROUGH an amenity on one leg instead of
+#: treating it as the loop's turnaround.
+Waypoint = Coordinate | int
+
+
+def _snap_waypoint(node_index: _NodeIndex, waypoint: Waypoint) -> int:
+    return waypoint if isinstance(waypoint, int) else node_index.nearest(waypoint)
+
+
+def _build_loop_via_waypoints(
+    graph: Any,
+    start_node: int,
+    node_index: _NodeIndex,
+    waypoints: list[Waypoint],
+    paths: dict[int, list[int]] | None,
+) -> tuple[RouteCandidate, list[int]] | None:
+    """Stitch start -> waypoints[0] -> waypoints[1] -> ... -> start.
+
+    Shared core of both the plain 4-anchor polygon loop (`_build_loop`,
+    waypoints = [B, C, D]) and the amenity-aware variant
+    (`polygon_amenity.py`, which splices an already-snapped amenity
+    node into the sequence). Each `Coordinate` waypoint is snapped to
+    the graph; each `int` waypoint (already a node id) is used as-is.
+    Guards against duplicate/collapsed waypoints (any waypoint
+    resolving to the start node or an earlier waypoint's node) and
+    unreachable legs, returning None so the caller can cheaply move on
+    rather than raise. Every leg after the first accumulates used edges
+    so later legs avoid retracing earlier ones (reuse-penalized
+    routing), exactly like V1's turnaround-and-return but applied
+    across every leg of the loop instead of just one.
+    """
+    nodes = [start_node]
+    for waypoint in waypoints:
+        node = _snap_waypoint(node_index, waypoint)
+        if node in nodes:
+            return None
+        nodes.append(node)
+    nodes.append(start_node)
+
+    try:
+        first_leg = outbound_path(graph, start_node, nodes[1], paths)
+    except RouteNotFoundError:
+        return None
+    full_path = list(first_leg)
+    used = edge_pairs(first_leg)
+
+    for i in range(1, len(nodes) - 1):
+        leg = reuse_penalized_path(graph, nodes[i], nodes[i + 1], used)
+        if leg is None:
+            return None
+        full_path += leg[1:]
+        used |= edge_pairs(leg)
+
+    if full_path[0] != start_node or full_path[-1] != start_node:
+        return None  # defensive -- unreachable by construction
+
+    return path_to_candidate(graph, full_path), full_path
+
+
 def _build_loop(
     graph: Any,
     start_node: int,
@@ -106,53 +178,123 @@ def _build_loop(
     paths: dict[int, list[int]] | None,
 ) -> tuple[RouteCandidate, list[int]] | None:
     """Attempt one (template, scale) combination end to end: place
-    synthetic anchors, snap each to the graph, and stitch reuse-
-    penalized legs start -> B -> C -> D -> start.
-
-    Guards against duplicate/collapsed anchors (any of B/C/D snapping
-    onto the start node or onto an earlier anchor) and unreachable
-    legs, returning None so the caller can cheaply move on to the next
-    template/scale rather than raise.
-    """
+    synthetic anchors and stitch reuse-penalized legs
+    start -> B -> C -> D -> start. Thin wrapper around
+    `_build_loop_via_waypoints` for the plain (no-amenity) case."""
     b_coord, c_coord, d_coord = template_anchors(
         start_coord, target_distance_m, template, scale
     )
+    return _build_loop_via_waypoints(
+        graph, start_node, node_index, [b_coord, c_coord, d_coord], paths
+    )
 
-    b_node = node_index.nearest(b_coord)
-    if b_node == start_node:
-        return None
-    c_node = node_index.nearest(c_coord)
-    if c_node in (start_node, b_node):
-        return None
-    d_node = node_index.nearest(d_coord)
-    if d_node in (start_node, b_node, c_node):
-        return None
 
-    try:
-        leg_ab = outbound_path(graph, start_node, b_node, paths)
-    except RouteNotFoundError:
-        return None
-    used = edge_pairs(leg_ab)
+def _next_scale_estimate(
+    history: list[tuple[float, float]],
+    target_distance_m: float,
+    last_scale: float,
+    last_distance: float,
+    min_scale: float,
+    max_scale: float,
+) -> float:
+    """Secant-method estimate of the next scale to try, using the two
+    most recent (scale, distance) points on file. Falls back to plain
+    proportional correction (`scale *= target/actual`) when fewer than
+    two points exist yet, or the two most recent points are
+    degenerate (equal scale or equal distance -- no local slope to
+    fit). See `_tune_waypoints`'s `use_secant_refinement` for when
+    this is worth the extra bookkeeping over plain proportional
+    correction."""
+    if len(history) >= 2:
+        (scale_a, distance_a), (scale_b, distance_b) = history[-2], history[-1]
+        if scale_a != scale_b and distance_a != distance_b:
+            slope = (distance_b - distance_a) / (scale_b - scale_a)
+            if slope != 0:
+                intercept = distance_a - slope * scale_a
+                estimated = (target_distance_m - intercept) / slope
+                return max(min_scale, min(max_scale, estimated))
 
-    leg_bc = reuse_penalized_path(graph, b_node, c_node, used)
-    if leg_bc is None:
-        return None
-    used |= edge_pairs(leg_bc)
+    return max(min_scale, min(max_scale, last_scale * (target_distance_m / last_distance)))
 
-    leg_cd = reuse_penalized_path(graph, c_node, d_node, used)
-    if leg_cd is None:
-        return None
-    used |= edge_pairs(leg_cd)
 
-    leg_da = reuse_penalized_path(graph, d_node, start_node, used)
-    if leg_da is None:
-        return None
+def _tune_waypoints(
+    graph: Any,
+    start_node: int,
+    node_index: _NodeIndex,
+    waypoints_at_scale: Callable[[float], list[Waypoint]],
+    target_distance_m: float,
+    initial_scale: float,
+    tolerance_m: float,
+    paths: dict[int, list[int]] | None,
+    min_scale: float = MIN_SCALE,
+    max_scale: float = MAX_SCALE,
+    max_correction_attempts: int = MAX_CORRECTION_ATTEMPTS,
+    use_secant_refinement: bool = False,
+) -> tuple[RouteCandidate, list[int]] | None:
+    """Bounded iterative distance tuning shared by the plain and
+    amenity-aware generators.
 
-    full_path = leg_ab + leg_bc[1:] + leg_cd[1:] + leg_da[1:]
-    if full_path[0] != start_node or full_path[-1] != start_node:
-        return None  # defensive -- unreachable by construction
+    Builds the loop from `waypoints_at_scale(scale)`; if its distance
+    misses target by more than tolerance, picks a new scale and
+    rebuilds, up to `max_correction_attempts` extra tries (bounded
+    iterative correction, not a full binary search -- see module
+    docstring for why). Never splices an out-and-back spur the way
+    V1's length_tune.py does: the closest attempt found is returned
+    even if it still misses tolerance, so every V2 candidate has zero
+    tuner-generated start spurs by construction.
 
-    return path_to_candidate(graph, full_path), full_path
+    `min_scale`/`max_scale` default to the plain generator's bounds
+    but are overridable: `polygon_amenity.py` widens the floor,
+    because a FIXED waypoint (the amenity) doesn't shrink with the
+    rest of the polygon -- when its detour already consumes a large
+    share of the target distance, hitting target requires shrinking
+    the free anchors well below 0.4x, which the plain generator never
+    needs to do (its whole loop scales together).
+
+    `use_secant_refinement` (default False, preserving the plain
+    generator's exact original behavior) switches the correction step
+    from plain proportional (`scale *= target/actual`) to a secant fit
+    over the two most recent tried points once at least two exist (see
+    `_next_scale_estimate`). Proportional correction converges slowly
+    -- sometimes taking its whole attempt budget in tiny single-digit-
+    percent steps without closing the gap -- when a large FIXED
+    component (an amenity's detour) makes distance a poor proportional
+    function of scale; a secant fit re-estimates the true local slope
+    from real builds every step, closing in far faster. Only
+    `polygon_amenity.py` opts in; the plain (no-amenity) path has no
+    fixed component, so proportional correction already works well
+    there and this stays off to avoid changing its validated behavior.
+    """
+    scale = initial_scale
+    best: tuple[RouteCandidate, list[int]] | None = None
+    best_error = float("inf")
+    history: list[tuple[float, float]] = []
+
+    for _ in range(1 + max_correction_attempts):
+        result = _build_loop_via_waypoints(
+            graph, start_node, node_index, waypoints_at_scale(scale), paths
+        )
+        if result is None:
+            break  # can't build at this scale -- don't force it
+
+        candidate, _node_path = result
+        distance = candidate.distance_m
+        error = abs(distance - target_distance_m)
+        if error < best_error:
+            best, best_error = result, error
+
+        if best_error <= tolerance_m or distance <= 0:
+            break
+
+        if use_secant_refinement:
+            history.append((scale, distance))
+            scale = _next_scale_estimate(
+                history, target_distance_m, scale, distance, min_scale, max_scale
+            )
+        else:
+            scale = max(min_scale, min(max_scale, scale * (target_distance_m / distance)))
+
+    return best
 
 
 def _tune_template(
@@ -166,41 +308,103 @@ def _tune_template(
     tolerance_m: float,
     paths: dict[int, list[int]] | None,
 ) -> tuple[RouteCandidate, list[int]] | None:
-    """Bounded iterative distance tuning for one template.
+    """Bounded iterative distance tuning for one plain (no-amenity)
+    template. Thin wrapper around `_tune_waypoints`."""
 
-    Builds the loop; if its distance misses target by more than
-    tolerance, rescales the polygon by the observed target/actual
-    ratio and rebuilds, up to `MAX_CORRECTION_ATTEMPTS` extra tries
-    (bounded iterative correction, not a full binary search per
-    template -- see module docstring / PR notes for why). Never
-    splices an out-and-back spur the way V1's length_tune.py does: the
-    closest attempt found is returned even if it still misses
-    tolerance, so every V2 candidate has zero tuner-generated start
-    spurs by construction.
+    def waypoints_at_scale(scale: float) -> list[Waypoint]:
+        b, c, d = template_anchors(start_coord, target_distance_m, template, scale)
+        return [b, c, d]
+
+    return _tune_waypoints(
+        graph, start_node, node_index, waypoints_at_scale, target_distance_m,
+        initial_scale, tolerance_m, paths,
+    )
+
+
+def _calibration_scale_via(
+    graph: Any,
+    start_node: int,
+    node_index: _NodeIndex,
+    waypoints_at_scale: Callable[[float], list[Waypoint]],
+    target_distance_m: float,
+    paths: dict[int, list[int]] | None,
+    min_scale: float = MIN_SCALE,
+    max_scale: float = MAX_SCALE,
+) -> float:
+    """Probe-build `waypoints_at_scale(1.0)` to estimate how much the
+    graph inflates a synthetic perimeter into an actual routed
+    distance (streets rarely run in a straight line between corners,
+    so this is consistently > 1 in practice). Reusing this estimate as
+    a starting scale means most callers need at most one correction
+    pass instead of searching from scratch. Falls back to 1.0 (no
+    calibration) if the probe waypoints can't be built at all -- the
+    caller's own `_tune_waypoints` correction loop then calibrates
+    independently. `min_scale`/`max_scale` mirror `_tune_waypoints`'s
+    overridable bounds."""
+    probe = _build_loop_via_waypoints(
+        graph, start_node, node_index, waypoints_at_scale(1.0), paths
+    )
+    if probe is None or probe[0].distance_m <= 0:
+        return 1.0
+    return max(min_scale, min(max_scale, target_distance_m / probe[0].distance_m))
+
+
+def _affine_calibration_scale_via(
+    graph: Any,
+    start_node: int,
+    node_index: _NodeIndex,
+    waypoints_at_scale: Callable[[float], list[Waypoint]],
+    target_distance_m: float,
+    paths: dict[int, list[int]] | None,
+    min_scale: float = MIN_SCALE,
+    max_scale: float = MAX_SCALE,
+    probe_scales: tuple[float, float] = (0.3, 1.0),
+) -> float:
+    """Two-probe affine estimate of the scale that should hit target.
+
+    `_calibration_scale_via`'s single-probe estimate assumes distance
+    is roughly PROPORTIONAL to scale (true for the plain generator,
+    where the whole loop scales together). That assumption breaks when
+    `waypoints_at_scale` includes a FIXED, non-scaling waypoint (e.g.
+    `polygon_amenity.py`'s amenity node): its detour doesn't shrink
+    with the rest of the polygon, so distance is closer to an AFFINE
+    function of scale (`distance ~= intercept + slope * scale`) with a
+    large fixed intercept -- and `_tune_waypoints`'s proportional
+    per-step correction (`scale *= target/actual`) converges very
+    slowly against a large intercept (each step's ratio stays close to
+    1 even far from the right scale).
+
+    This builds two real probes and solves the affine model directly
+    for the scale that should hit target, which converges in one step
+    where the proportional approach could take many. Falls back to
+    `_calibration_scale_via`'s single-probe estimate if either probe
+    fails to build or the fit is degenerate (non-positive slope, or
+    equal probe scales).
     """
-    scale = initial_scale
-    best: tuple[RouteCandidate, list[int]] | None = None
-    best_error = float("inf")
-
-    for _ in range(1 + MAX_CORRECTION_ATTEMPTS):
-        result = _build_loop(
-            graph, start_node, node_index, template, start_coord, target_distance_m,
-            scale, paths,
+    scale_a, scale_b = probe_scales
+    probe_a = _build_loop_via_waypoints(
+        graph, start_node, node_index, waypoints_at_scale(scale_a), paths
+    )
+    probe_b = _build_loop_via_waypoints(
+        graph, start_node, node_index, waypoints_at_scale(scale_b), paths
+    )
+    if probe_a is None or probe_b is None or scale_a == scale_b:
+        return _calibration_scale_via(
+            graph, start_node, node_index, waypoints_at_scale, target_distance_m,
+            paths, min_scale, max_scale,
         )
-        if result is None:
-            break  # this template can't build at this scale -- don't force it
 
-        candidate, _node_path = result
-        error = abs(candidate.distance_m - target_distance_m)
-        if error < best_error:
-            best, best_error = result, error
+    distance_a, distance_b = probe_a[0].distance_m, probe_b[0].distance_m
+    slope = (distance_b - distance_a) / (scale_b - scale_a)
+    if slope <= 0:
+        return _calibration_scale_via(
+            graph, start_node, node_index, waypoints_at_scale, target_distance_m,
+            paths, min_scale, max_scale,
+        )
 
-        if best_error <= tolerance_m or candidate.distance_m <= 0:
-            break
-
-        scale = max(MIN_SCALE, min(MAX_SCALE, scale * (target_distance_m / candidate.distance_m)))
-
-    return best
+    intercept = distance_a - slope * scale_a
+    estimated_scale = (target_distance_m - intercept) / slope
+    return max(min_scale, min(max_scale, estimated_scale))
 
 
 def _calibration_scale(
@@ -211,23 +415,16 @@ def _calibration_scale(
     target_distance_m: float,
     paths: dict[int, list[int]] | None,
 ) -> float:
-    """Probe-build the first template at scale=1.0 to estimate how much
-    the graph inflates a synthetic rectangle's perimeter into an
-    actual routed distance (streets rarely run in a straight line
-    between corners, so this is consistently > 1 in practice). Reusing
-    this estimate as every other template's starting scale means most
-    templates need at most one correction pass instead of searching
-    from scratch. Falls back to 1.0 (no calibration) if the probe
-    template can't be built at all -- other templates then calibrate
-    independently via their own `_tune_template` correction loop.
-    """
-    probe = _build_loop(
-        graph, start_node, node_index, TEMPLATES[0], start_coord, target_distance_m,
-        1.0, paths,
+    """Probe the first plain template at scale=1.0. Thin wrapper
+    around `_calibration_scale_via`."""
+
+    def waypoints_at_scale(scale: float) -> list[Waypoint]:
+        b, c, d = template_anchors(start_coord, target_distance_m, TEMPLATES[0], scale)
+        return [b, c, d]
+
+    return _calibration_scale_via(
+        graph, start_node, node_index, waypoints_at_scale, target_distance_m, paths
     )
-    if probe is None or probe[0].distance_m <= 0:
-        return 1.0
-    return max(MIN_SCALE, min(MAX_SCALE, target_distance_m / probe[0].distance_m))
 
 
 def polygon_loop_pairs(

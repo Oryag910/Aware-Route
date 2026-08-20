@@ -1,9 +1,11 @@
-from typing import Any, Literal
+import os
+from typing import Any, Literal, cast
 
 from app.amenities.snapping import SnappedAmenity
 from app.generation.amenity_first import through_amenities_pairs
 from app.generation.length_tune import tune_generator_pairs_to_target
 from app.generation.out_and_back import out_and_back_pairs
+from app.generation.polygon_amenity import polygon_loop_through_amenities_pairs
 from app.generation.polygon_loop import polygon_loop_pairs
 from app.generation.round_route import round_pairs
 from app.generation.routes import GeneratedRoute, compute_quality
@@ -12,6 +14,37 @@ from app.routing.provider import Coordinate, RouteCandidate
 
 
 Shape = Literal["round", "out_and_back", "mix"]
+
+RoundGenerator = Literal["v1", "polygon"]
+
+
+def _round_generator_version() -> RoundGenerator:
+    """Feature selector for explicit `shape="round"` local generation
+    (PR #16): "v1" (default -- see below) or "polygon" (the new
+    multi-anchor generator, opt-in). Sourced from the `ROUND_GENERATOR`
+    environment variable so it can be flipped without a code change.
+    Only affects `shape == "round"` in `generate_routes` below --
+    "mix" always uses V1's `round_pairs`/`through_amenities_pairs` for
+    its round component regardless of this setting (mix's own redesign
+    is PR #17), and "out_and_back" is untouched by PR #16 entirely.
+
+    Default is "v1", NOT "polygon", despite polygon's geometry being
+    substantially better on every measured axis (radial exposure,
+    elongation, compactness, zero tuner-generated start spurs) and its
+    amenity-aware reliability clearing the >=95% bar (98.9% on the
+    matched 89-scenario benchmark). The blocker is latency: the full
+    537-scenario benchmark's p95 latency with polygon as default is
+    2.27s, still above the project's existing p95<2.0s gate even after
+    a dedicated optimization pass (secant-method distance-tuning
+    convergence + early-stopping the amenity/template search once
+    enough candidates are found -- see scripts/benchmark_polygon_loop.py
+    and scripts/benchmark_polygon_amenity.py for the exact numbers this
+    default was chosen from). Set `ROUND_GENERATOR=polygon` to opt in
+    for explicit testing/staged rollout ahead of a future latency pass
+    that closes this gap.
+    """
+    value = os.environ.get("ROUND_GENERATOR", "v1").strip().lower()
+    return "polygon" if value == "polygon" else "v1"
 
 
 def _tuned_pairs(
@@ -92,7 +125,13 @@ def generate_routes(
         snapped is not None and min_range_m is not None and max_range_m is not None
     )
 
-    if shape in ("round", "out_and_back"):
+    if shape == "round" and _round_generator_version() == "polygon":
+        pool = _to_routes(
+            graph,
+            polygon_loop_pairs(graph, start_node, target_distance_m, count, paths),
+            "round",
+        )
+    elif shape in ("round", "out_and_back"):
         pool = _to_routes(
             graph,
             _tuned_pairs(
@@ -129,18 +168,27 @@ def generate_routes(
         return pool[:count]
 
     assert snapped is not None and min_range_m is not None and max_range_m is not None
-    amenity_triples = through_amenities_pairs(
-        graph,
-        start,
-        target_distance_m,
-        snapped,
-        min_range_m,
-        max_range_m,
-        shape,
-        count,
-        dists,
-        paths,
-    )
+    amenity_triples: list[tuple[RouteCandidate, list[int], Shape]]
+    if shape == "round" and _round_generator_version() == "polygon":
+        amenity_triples = cast(
+            "list[tuple[RouteCandidate, list[int], Shape]]",
+            polygon_loop_through_amenities_pairs(
+                graph, start, target_distance_m, snapped, min_range_m, max_range_m, count,
+            ),
+        )
+    else:
+        amenity_triples = through_amenities_pairs(
+            graph,
+            start,
+            target_distance_m,
+            snapped,
+            min_range_m,
+            max_range_m,
+            shape,
+            count,
+            dists,
+            paths,
+        )
     amenity_pool = [
         GeneratedRoute(
             candidate=candidate,
@@ -232,20 +280,51 @@ def generate_polygon_loop_candidates(
     target_distance_m: float,
     count: int,
 ) -> list[RouteCandidate]:
-    """V2 experimental generator (PR #15): a multi-anchor polygon-loop
-    round-route generator, offered alongside V1's turnaround-based
-    `generate_candidates(..., shape="round")` for side-by-side
-    benchmarking (see scripts/benchmark_polygon_loop.py). This is a
-    standalone entry point, not a `shape` option -- `generate_routes`/
-    `generate_candidates`/`generate_amenity_aware` (V1, including the
-    "mix" and amenity-aware pools) are completely unchanged and keep
-    using V1 `round_pairs`. Production does not call this function
-    until V2 is validated against the V1 baseline.
+    """Multi-anchor polygon-loop round-route generator (PR #15).
+
+    Standalone entry point used directly by
+    scripts/benchmark_polygon_loop.py for side-by-side V1-vs-V2
+    comparison. `generate_routes`'s `shape == "round"` branch also
+    calls `polygon_loop_pairs` directly (this function's own
+    implementation, inlined) when `ROUND_GENERATOR=polygon` is set
+    explicitly -- see `_round_generator_version`. The default remains
+    V1; "mix" and "out_and_back" are unaffected regardless of the flag
+    and always keep using V1 `round_pairs`/`out_and_back_pairs`.
     """
     start_node = nearest_node(graph, start)
     _dists, paths = single_source_paths(graph, start_node)
     pairs = polygon_loop_pairs(graph, start_node, target_distance_m, count, paths)
     return [candidate for candidate, _node_path in pairs]
+
+
+def generate_polygon_loop_amenity_candidates(
+    graph: Any,
+    start: Coordinate,
+    target_distance_m: float,
+    count: int,
+    snapped: list[SnappedAmenity],
+    min_range_m: float,
+    max_range_m: float,
+) -> list[RouteCandidate]:
+    """Amenity-aware polygon-loop round-route generator (PR #16):
+    routes an amenity as a WAYPOINT on one leg of a multi-anchor
+    polygon loop (see `polygon_amenity.py`) instead of treating it as
+    the route's turnaround the way V1's `generate_amenity_aware` does.
+
+    Standalone entry point used directly by
+    scripts/benchmark_polygon_amenity.py for side-by-side V1-vs-V2
+    comparison. `generate_routes`'s `shape == "round"` amenity-aware
+    branch also calls `polygon_loop_through_amenities_pairs` (this
+    function's own implementation, inlined) when
+    `ROUND_GENERATOR=polygon` is set explicitly -- see
+    `_round_generator_version`. The default remains V1; "mix" and
+    "out_and_back" are unaffected regardless of the flag and always
+    keep using V1 `through_amenities_pairs`.
+    """
+    triples = polygon_loop_through_amenities_pairs(
+        graph, start, target_distance_m, snapped, min_range_m, max_range_m, count
+    )
+    return [candidate for candidate, _node_path, _shape in triples]
 
 
 def _dedup_routes(routes: list[GeneratedRoute]) -> list[GeneratedRoute]:
