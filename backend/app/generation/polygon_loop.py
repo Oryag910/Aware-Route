@@ -80,13 +80,18 @@ MIN_SCALE = 0.4
 MAX_SCALE = 2.2
 MAX_CORRECTION_ATTEMPTS = 4  # extra rebuilds beyond the initial calibrated attempt
 
-# A genuine 4-leg loop should retrace almost nothing along the way.
-# This is deliberately far below MAX_REASONABLE_REPEATED_SEGMENT_RATIO
-# (0.15, scripts/benchmark_suite.py, tuned for V1's turnaround-shaped
-# routes) -- a V2 candidate that needs this much retracing to close
-# its loop has effectively degenerated into an out-and-back, so it is
-# rejected outright rather than ranked low. The whole point of the
-# multi-anchor topology is to avoid retracing, not merely tolerate it.
+# A genuine 4-leg loop should retrace almost nothing along the way. A
+# plain out-and-back's edge_reuse_ratio is ~0.5 (every outbound edge
+# gets revisited once on the return leg -- see
+# quality.edge_reuse_ratio's docstring); 0.2 sits well below that
+# baseline, so a V2 candidate crossing it has meaningfully degenerated
+# toward an out-and-back rather than staying a broad loop, and is
+# rejected outright rather than ranked low. This is a DIFFERENT metric
+# from MAX_REASONABLE_REPEATED_SEGMENT_RATIO (0.15,
+# scripts/benchmark_suite.py) -- that one measures rendered-geometry
+# segment repeats on V1's turnaround-shaped routes, not node-path edge
+# reuse -- so the two threshold values are not directly comparable
+# despite looking similar.
 MAX_EDGE_REUSE_RATIO = 0.2
 
 
