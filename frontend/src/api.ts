@@ -110,18 +110,17 @@ function parseErrorDetail(body: unknown): {
   return { message: "Request failed", isValidationError: false };
 }
 
-// API base URL scheme:
-// - Dev: VITE_API_URL is unset, so API_BASE is "". Requests go to relative
-//   "/api/..." paths, which Vite's dev proxy (vite.config.ts) forwards to
-//   the local backend after stripping the "/api" prefix.
-// - Prod: VITE_API_URL is set to the Render backend's origin (which has no
-//   "/api" prefix on its routes). apiUrl() only prepends "/api" when
-//   API_BASE is empty, so prod requests hit "${API_BASE}/routes/..." while
-//   dev requests hit "/api/routes/...".
-const API_BASE = (import.meta.env.VITE_API_URL as string | undefined ?? "").replace(
-  /\/+$/,
-  "",
-);
+// API routing scheme:
+// - Local dev: VITE_API_URL may point directly at a backend. If it is unset,
+//   requests use relative `/api/...` paths and Vite's dev proxy forwards them
+//   to localhost after stripping the `/api` prefix.
+// - Deployed Vercel builds (production AND previews): always use relative
+//   `/api/...` paths. `vercel.json` proxies those server-side to Render, so the
+//   browser stays same-origin and never depends on Render CORS allowing each
+//   ephemeral Vercel preview hostname.
+const API_BASE = import.meta.env.DEV
+  ? (import.meta.env.VITE_API_URL as string | undefined ?? "").replace(/\/+$/, "")
+  : "";
 
 function apiUrl(path: string): string {
   return API_BASE === "" ? `/api${path}` : `${API_BASE}${path}`;
