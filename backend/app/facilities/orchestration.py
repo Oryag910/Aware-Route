@@ -53,9 +53,21 @@ class ScoredRoute:
 def _quality_score(route: GeneratedRoute) -> float:
     """Cheap route-quality proxy: less edge reuse and higher pedestrian
     share is better. Deliberately simple -- this is a tie-breaker tier
-    (see `rank_key`), not the primary ranking signal."""
+    (see `rank_key`), not the primary ranking signal.
+
+    Edge reuse is zeroed for out_and_back: retracing the outbound leg on
+    the return is that shape's defining, expected feature (an OAB's
+    edge_reuse_ratio is inherently ~0.5), not a defect -- see
+    `app/generation/quality.py`'s `edge_reuse_ratio` docstring. Counting
+    it uniformly would unfairly penalize every OAB candidate relative to
+    a round candidate whenever this score is compared across shapes
+    (e.g. `_select_mix_portfolio`'s cross-shape backfill below), the
+    exact "concrete OAB punished for legitimate retracing" failure mode
+    this scorer must avoid.
+    """
     quality = route.quality
-    return quality.edge_reuse_ratio + (1.0 - quality.pedestrian_share)
+    reuse_penalty = 0.0 if route.shape == "out_and_back" else quality.edge_reuse_ratio
+    return reuse_penalty + (1.0 - quality.pedestrian_share)
 
 
 def score_candidates(
