@@ -62,3 +62,5 @@ backend/data/manhattan_walk_graph.*
 Thumbs.db
 
 # Deployment state 
+.vercel
+.env*

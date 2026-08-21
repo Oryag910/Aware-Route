@@ -15,6 +15,10 @@ const HOP_BY_HOP_HEADERS = new Set([
   "upgrade",
   "host",
   "content-length",
+  // fetch()'s arrayBuffer() transparently decompresses the body, so the
+  // bytes we send back are never actually gzip/br-encoded; forwarding the
+  // upstream's original content-encoding would mislabel a plain response.
+  "content-encoding",
 ]);
 
 export default async function handler(
@@ -27,8 +31,13 @@ export default async function handler(
     return;
   }
 
-  // `path` is the catch-all route param injected by the `[...path]` filename,
-  // not a real query parameter, so it's excluded from the forwarded query string.
+  // `path` is injected by vercel.json's `/api/:path*` rewrite (not a real
+  // client query parameter), so it's excluded from the forwarded query
+  // string. A fixed function filename + explicit rewrite is used instead of
+  // a `[...path]` dynamic filename because Vercel's auto-generated route for
+  // bracket-named catch-all functions only matches single path segments on
+  // this (non-Next.js) framework preset; multi-segment paths like
+  // `/api/routes/with-restroom` 404 before ever reaching the function.
   const pathParam = req.query.path;
   const path = Array.isArray(pathParam) ? pathParam.join("/") : (pathParam ?? "");
   const base = backendUrl.endsWith("/") ? backendUrl : `${backendUrl}/`;
