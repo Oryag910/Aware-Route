@@ -46,6 +46,10 @@ const FACILITY_KIND_LABELS: Record<FacilityKind, string> = {
   water: "water",
 };
 
+function modeRequiresKind(mode: FacilityMode, kind: FacilityKind): boolean {
+  return mode === "both" || mode === kind;
+}
+
 let requirementIdCounter = 0;
 
 function makeRequirement(kind: FacilityKind): FacilityRequirementForm {
@@ -90,14 +94,16 @@ export default function RouteForm({
     setFacilityRequirements((current) => {
       let next = current;
 
-      const needsRestroom =
-        nextMode === "restroom" || nextMode === "both";
-      const needsWater = nextMode === "water" || nextMode === "both";
-
-      if (needsRestroom && !next.some((r) => r.kind === "restroom")) {
+      if (
+        modeRequiresKind(nextMode, "restroom") &&
+        !next.some((r) => r.kind === "restroom")
+      ) {
         next = [...next, makeRequirement("restroom")];
       }
-      if (needsWater && !next.some((r) => r.kind === "water")) {
+      if (
+        modeRequiresKind(nextMode, "water") &&
+        !next.some((r) => r.kind === "water")
+      ) {
         next = [...next, makeRequirement("water")];
       }
 
@@ -114,13 +120,13 @@ export default function RouteForm({
       const target = current.find((r) => r.id === id);
       const withoutTarget = current.filter((r) => r.id !== id);
 
-      // In "both" mode, never let a kind drop to zero rows silently --
-      // re-seed a default row for that kind instead of leaving a mode
-      // that claims to require both restroom and water stops with none
-      // of one kind.
+      // Never let a kind the active mode requires drop to zero rows
+      // silently -- re-seed a default row instead of leaving a mode that
+      // claims to require restroom and/or water stops with none of one
+      // (or both, for "both" mode) kind.
       if (
-        facilityMode === "both" &&
         target !== undefined &&
+        modeRequiresKind(facilityMode, target.kind) &&
         !withoutTarget.some((r) => r.kind === target.kind)
       ) {
         return [...withoutTarget, makeRequirement(target.kind)];

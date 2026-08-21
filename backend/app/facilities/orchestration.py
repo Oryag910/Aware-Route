@@ -137,7 +137,28 @@ MIX_SHAPE_ALLOCATION: dict[int, tuple[int, int]] = {
 }
 
 
+def _constraint_tier(item: ScoredRoute) -> tuple[int, int, int]:
+    """The hard-constraint-quality prefix of `rank_key`: fully-valid bit,
+    within-tolerance bit, requirements-satisfied count. Two candidates in
+    the same tier are equivalent on hard constraints -- shape allocation
+    may break ties between them. A candidate in a strictly better tier
+    must never be displaced by shape quota (see `_select_mix_portfolio`)."""
+    key = rank_key(
+        item.route.candidate.geometry, item.distance_error_m, item.facility_score,
+        item.quality_score,
+    )
+    return key[0], key[1], key[2]
+
+
 def _select_mix_portfolio(scored: list[ScoredRoute], count: int) -> list[ScoredRoute]:
+    """`scored` is already sorted by `rank_key`, so equal-tier candidates
+    are contiguous. Shape allocation (`MIX_SHAPE_ALLOCATION`) is applied
+    tier-by-tier, best tier first: a whole tier that fits in the
+    remaining slots is taken outright (no shape filtering), and shape
+    diversity is only used to pick a subset when a tier is larger than
+    the remaining slots. This guarantees hard-constraint quality always
+    outranks mix-shape diversity -- a partial/worse-tier candidate can
+    never bump a better-tier one just to fill a round/OAB quota."""
     if count <= 1 or not scored:
         return scored[:count]
 
@@ -148,25 +169,48 @@ def _select_mix_portfolio(scored: list[ScoredRoute], count: int) -> list[ScoredR
     def geometry_of(item: ScoredRoute) -> Any:
         return item.route.candidate.geometry
 
-    rounds = [s for s in scored if s.route.shape == "round"]
-    out_and_backs = [s for s in scored if s.route.shape == "out_and_back"]
+    chosen: list[ScoredRoute] = []
+    remaining_round, remaining_oab = target_round, target_oab
 
-    chosen = select_diverse(rounds, geometry_of, target_round) + select_diverse(
-        out_and_backs, geometry_of, target_oab
-    )
-    chosen_ids = {id(item) for item in chosen}
+    index = 0
+    while index < len(scored) and len(chosen) < count:
+        tier_key = _constraint_tier(scored[index])
+        tier_items: list[ScoredRoute] = []
+        while index < len(scored) and _constraint_tier(scored[index]) == tier_key:
+            tier_items.append(scored[index])
+            index += 1
 
-    if len(chosen) < count:
-        for item in scored:
-            if len(chosen) >= count:
-                break
-            if id(item) in chosen_ids:
-                continue
+        slots_left = count - len(chosen)
+        if len(tier_items) <= slots_left:
+            picked = tier_items
+        else:
+            # This tier is a tie on hard-constraint quality -- shape
+            # diversity is a valid tie-breaker here, but never across tiers.
+            tier_rounds = [s for s in tier_items if s.route.shape == "round"]
+            tier_oabs = [s for s in tier_items if s.route.shape == "out_and_back"]
+            picked = select_diverse(
+                tier_rounds, geometry_of, min(remaining_round, slots_left)
+            ) + select_diverse(tier_oabs, geometry_of, min(remaining_oab, slots_left))
+            picked_ids = {id(item) for item in picked}
+            if len(picked) < slots_left:
+                for item in tier_items:
+                    if len(picked) >= slots_left:
+                        break
+                    if id(item) in picked_ids:
+                        continue
+                    picked.append(item)
+                    picked_ids.add(id(item))
+            picked = picked[:slots_left]
+
+        for item in picked:
             chosen.append(item)
-            chosen_ids.add(id(item))
+            if item.route.shape == "round":
+                remaining_round = max(0, remaining_round - 1)
+            else:
+                remaining_oab = max(0, remaining_oab - 1)
 
-    # Diversity/portfolio selection only decides membership -- restore
-    # overall rank order for display.
+    # Tier/portfolio selection only decides membership -- restore overall
+    # rank order for display.
     rank_position = {id(item): index for index, item in enumerate(scored)}
     chosen.sort(key=lambda item: rank_position[id(item)])
     return chosen[:count]
