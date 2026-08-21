@@ -1,0 +1,114 @@
+name: PR Preview Sync
+
+# Render posts a GitHub Deployment (+ status) for every PR Service Preview
+# it builds. When that status turns "success" and the deployment's URL is a
+# Render onrender.com host, resolve the PR the commit belongs to, point that
+# branch's Vercel Preview BACKEND_URL at the Render preview, and redeploy so
+# the Vercel preview picks it up. No Render API key needed -- this only reads
+# GitHub's deployment metadata, which Render already publishes.
+on:
+  deployment_status:
+
+permissions:
+  contents: read
+  deployments: read
+  pull-requests: read
+
+jobs:
+  sync-backend-url:
+    if: github.event.deployment_status.state == 'success'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Resolve Render preview URL and matching open PR branch
+        id: resolve
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const url =
+              context.payload.deployment_status.environment_url ||
+              context.payload.deployment_status.target_url ||
+              "";
+            if (!url.includes(".onrender.com")) {
+              core.info(`Deployment status URL "${url}" is not a Render preview; skipping.`);
+              core.setOutput("found", "false");
+              return;
+            }
+
+            const sha = context.payload.deployment.sha;
+            const { data: prs } = await github.rest.repos.listPullRequestsAssociatedWithCommit({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              commit_sha: sha,
+            });
+            // A commit can appear in more than one PR's history (e.g. a
+            // shared base branch); only trust a PR whose current head is
+            // this exact commit, not just any open PR that contains it.
+            const openPr = prs.find((pr) => pr.state === "open" && pr.head.sha === sha);
+            if (!openPr) {
+              core.info(`No open PR with head sha ${sha} found; skipping.`);
+              core.setOutput("found", "false");
+              return;
+            }
+
+            core.setOutput("found", "true");
+            core.setOutput("branch", openPr.head.ref);
+            core.setOutput("pr_number", String(openPr.number));
+            core.setOutput("render_url", url);
+
+      - name: Sync Vercel Preview BACKEND_URL and redeploy
+        if: steps.resolve.outputs.found == 'true'
+        env:
+          VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+          VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
+          VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
+          RENDER_PREVIEW_URL: ${{ steps.resolve.outputs.render_url }}
+          BRANCH: ${{ steps.resolve.outputs.branch }}
+          PR_NUMBER: ${{ steps.resolve.outputs.pr_number }}
+        run: |
+          set -euo pipefail
+
+          if [ -z "${VERCEL_TOKEN:-}" ] || [ -z "${VERCEL_ORG_ID:-}" ] || [ -z "${VERCEL_PROJECT_ID:-}" ]; then
+            echo "::error::VERCEL_TOKEN, VERCEL_ORG_ID, or VERCEL_PROJECT_ID secret is missing. Cannot sync PR #${PR_NUMBER} (branch ${BRANCH}) to ${RENDER_PREVIEW_URL}."
+            exit 1
+          fi
+
+          BASE="https://api.vercel.com"
+
+          PROJECT_NAME=$(curl --fail --silent --show-error \
+            "${BASE}/v10/projects/${VERCEL_PROJECT_ID}?teamId=${VERCEL_ORG_ID}" \
+            -H "Authorization: Bearer ${VERCEL_TOKEN}" | jq -r '.name')
+
+          echo "Upserting Preview BACKEND_URL for branch '${BRANCH}' -> ${RENDER_PREVIEW_URL}"
+          curl --fail --silent --show-error \
+            -X POST "${BASE}/v10/projects/${VERCEL_PROJECT_ID}/env?upsert=true&teamId=${VERCEL_ORG_ID}" \
+            -H "Authorization: Bearer ${VERCEL_TOKEN}" \
+            -H "Content-Type: application/json" \
+            -d "$(jq -n \
+                --arg value "$RENDER_PREVIEW_URL" \
+                --arg branch "$BRANCH" \
+                '{key: "BACKEND_URL", value: $value, type: "encrypted", target: ["preview"], gitBranch: $branch}')" \
+            > /dev/null
+
+          echo "Looking up the latest ready Vercel preview deployment for branch '${BRANCH}'"
+          DEPLOYMENT_ID=$(curl --fail --silent --show-error \
+            "${BASE}/v6/deployments?projectId=${VERCEL_PROJECT_ID}&target=preview&branch=${BRANCH}&state=READY&limit=1&teamId=${VERCEL_ORG_ID}" \
+            -H "Authorization: Bearer ${VERCEL_TOKEN}" | jq -r '.deployments[0].uid // empty')
+
+          if [ -z "$DEPLOYMENT_ID" ]; then
+            echo "No existing Vercel preview deployment yet for branch '${BRANCH}'; BACKEND_URL is set and the next Vercel deploy for this branch will pick it up."
+            exit 0
+          fi
+
+          echo "Redeploying ${DEPLOYMENT_ID} so it rebuilds with the updated BACKEND_URL"
+          curl --fail --silent --show-error \
+            -X POST "${BASE}/v13/deployments?teamId=${VERCEL_ORG_ID}&forceNew=1" \
+            -H "Authorization: Bearer ${VERCEL_TOKEN}" \
+            -H "Content-Type: application/json" \
+            -d "$(jq -n \
+                --arg name "$PROJECT_NAME" \
+                --arg project "$VERCEL_PROJECT_ID" \
+                --arg id "$DEPLOYMENT_ID" \
+                '{name: $name, project: $project, deploymentId: $id, target: "preview", withLatestCommit: true}')" \
+            > /dev/null
+
+          echo "Vercel preview for branch '${BRANCH}' redeployed against ${RENDER_PREVIEW_URL}"
