@@ -137,17 +137,26 @@ MIX_SHAPE_ALLOCATION: dict[int, tuple[int, int]] = {
 }
 
 
-def _constraint_tier(item: ScoredRoute) -> tuple[int, int, int]:
+def _constraint_tier(item: ScoredRoute) -> tuple[int, int, int, float, float]:
     """The hard-constraint-quality prefix of `rank_key`: fully-valid bit,
-    within-tolerance bit, requirements-satisfied count. Two candidates in
-    the same tier are equivalent on hard constraints -- shape allocation
-    may break ties between them. A candidate in a strictly better tier
-    must never be displaced by shape quota (see `_select_mix_portfolio`)."""
+    within-tolerance bit, requirements-satisfied count, worst-single-
+    requirement range error, total range error across requirements. Two
+    candidates in the same tier are equivalent on hard constraints --
+    shape allocation may break ties between them. A candidate in a
+    strictly better tier must never be displaced by shape quota (see
+    `_select_mix_portfolio`).
+
+    Deliberately stops short of `rank_key`'s remaining fields
+    (`distance_error_m`, `quality_score`): once a route is inside the
+    distance tolerance, small exact-distance differences may reasonably
+    yield to shape diversity, but facility-constraint miss magnitude
+    (range error) may not. Fully-valid routes all have zero range error,
+    so this still allows useful diversity among them."""
     key = rank_key(
         item.route.candidate.geometry, item.distance_error_m, item.facility_score,
         item.quality_score,
     )
-    return key[0], key[1], key[2]
+    return key[0], key[1], key[2], key[3], key[4]
 
 
 def _select_mix_portfolio(scored: list[ScoredRoute], count: int) -> list[ScoredRoute]:

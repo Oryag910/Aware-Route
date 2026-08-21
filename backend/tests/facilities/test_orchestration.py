@@ -6,6 +6,7 @@ from app.facilities.orchestration import (
     natural_match_pool,
     score_candidates,
 )
+from app.facilities.models import FacilityRequirement, RequirementResult
 from app.facilities.scoring import FacilityScore, is_fully_valid
 from app.generation.routes import GeneratedRoute, QualityMetrics
 from app.routing.provider import Coordinate, RouteCandidate, RoutePoint
@@ -78,18 +79,34 @@ def test_out_and_back_edge_reuse_not_penalized_in_quality_score() -> None:
     assert by_shape["out_and_back"] == 0.5  # 1.0 - pedestrian_share(0.5)
 
 
+def _requirement_result(satisfied: bool, range_error_m: float, index: int) -> RequirementResult:
+    requirement = FacilityRequirement(
+        id=f"req-{index}", kind="restroom", min_distance_m=0.0, max_distance_m=1000.0
+    )
+    return RequirementResult(
+        requirement=requirement, satisfied=satisfied, range_error_m=range_error_m, encounter=None
+    )
+
+
 def _scored(
     shape: str,
     lat_offset: float,
     satisfied: int,
     total: int,
     distance_error_m: float = 0.0,
+    worst_range_error_m: float = 0.0,
 ) -> ScoredRoute:
     """Build a `ScoredRoute` with a controlled hard-constraint tier
-    (satisfied/total requirements, distance error) for `_select_mix_portfolio`
-    tests, bypassing real facility geometry/scoring entirely. `lat_offset`
-    keeps each fixture's geometry distinct so `select_diverse` never treats
-    two fixtures as overlapping."""
+    (satisfied/total requirements, distance error, and -- via real
+    `RequirementResult` fixtures -- facility range-error miss magnitude)
+    for `_select_mix_portfolio` tests, bypassing real facility
+    geometry/scoring entirely. Every unsatisfied requirement gets the
+    same `worst_range_error_m` miss (sufficient to control both the
+    worst-single-requirement and total range error `rank_key` tiers in
+    these tests); satisfied ones are exact (0.0), matching how
+    `assign_requirements` scores a hit. `lat_offset` keeps each fixture's
+    geometry distinct so `select_diverse` never treats two fixtures as
+    overlapping."""
     geometry = (
         RoutePoint(lat=40.0 + lat_offset, lon=-73.0, elevation_m=0.0),
         RoutePoint(lat=40.01 + lat_offset, lon=-73.0, elevation_m=0.0),
@@ -104,8 +121,14 @@ def _scored(
         waytype_breakdown={},
     )
     route = GeneratedRoute(candidate=candidate, node_path=[1, 2], shape=shape, quality=quality)  # type: ignore[arg-type]
+    requirement_results = tuple(
+        _requirement_result(True, 0.0, index) for index in range(satisfied)
+    ) + tuple(
+        _requirement_result(False, worst_range_error_m, satisfied + index)
+        for index in range(total - satisfied)
+    )
     facility_score = FacilityScore(
-        requirement_results=(),
+        requirement_results=requirement_results,
         requirements_total=total,
         requirements_satisfied_count=satisfied,
         all_satisfied=satisfied == total,
@@ -176,3 +199,29 @@ def test_mix_portfolio_prefers_shape_diversity_within_equivalent_tier() -> None:
     assert {item.route.shape for item in result} == {"round", "out_and_back"}
     assert round_a in result
     assert oab_a in result
+
+
+def test_mix_portfolio_worse_facility_miss_not_masked_by_tied_satisfied_count() -> None:
+    """Two partial routes can tie on requirements-satisfied count while
+    differing sharply in HOW BADLY the failing requirement misses its
+    window -- that miss magnitude (worst/total range error) is part of
+    the hard-constraint tier too, so a materially worse miss must not
+    sneak in over a better one just to fill the round/OAB shape quota.
+    Round A (10m worst miss) and Round B (20m worst miss) are each their
+    own tier, both strictly better than OAB C's 1000m miss -- count=2
+    exhausts on the two rounds before OAB C's tier is ever considered."""
+    round_a = _scored(
+        "round", 0.00, satisfied=3, total=4, worst_range_error_m=10.0
+    )
+    round_b = _scored(
+        "round", 0.01, satisfied=3, total=4, worst_range_error_m=20.0
+    )
+    oab_c = _scored(
+        "out_and_back", 0.02, satisfied=3, total=4, worst_range_error_m=1000.0
+    )
+    scored = [round_a, round_b, oab_c]  # already best-to-worst per rank_key
+
+    result = _select_mix_portfolio(scored, 2)
+
+    assert result == [round_a, round_b]
+    assert oab_c not in result
