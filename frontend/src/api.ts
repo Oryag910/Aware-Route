@@ -1,55 +1,70 @@
 import type { RouteFormValues } from "./components/RouteForm";
 
+// The backend also sends `elevation_m` per point, but the underlying
+// elevation data isn't accurate enough to surface to users -- it's
+// deliberately omitted from this type so nothing in the frontend can
+// display or export it. See gpx.ts and explanations.ts.
 export type RoutePoint = {
   lat: number;
   lon: number;
-  elevation_m: number;
 };
 
-export type RestroomInfo = {
-  facility_name: string;
-  status: string;
+// Public facility vocabulary the backend exposes ("water", not the legacy
+// internal "fountain" data-source naming).
+export type FacilityKind = "restroom" | "water";
+
+export type FacilityRequirementPayload = {
+  id: string;
+  kind: FacilityKind;
+  min_distance_m: number;
+  max_distance_m: number;
+};
+
+export type FacilityOut = {
+  id: string;
+  kind: FacilityKind;
+  name: string | null;
+  status: string | null;
   hours_of_operation: string | null;
   latitude: number;
   longitude: number;
   mile_marker_m: number;
-  // "restroom" | "fountain" — which amenity kind, so the map can pick a
-  // distinct marker. Backend defaults to "restroom" (ORS pipeline); the
-  // local pipeline sends the real kind.
-  kind: "restroom" | "fountain";
+  off_route_distance_m: number;
+  encounter_index: number;
 };
 
-export type RankedRoute = {
+export type FacilityResultOut = {
+  requirement_id: string;
+  kind: FacilityKind;
+  requested_min_m: number;
+  requested_max_m: number;
+  satisfied: boolean;
+  range_error_m: number | null;
+  facility: FacilityOut | null;
+};
+
+export type GenericRoute = {
   geometry: RoutePoint[];
+  shape: "round" | "out_and_back";
+
   distance_m: number;
-  elevation_gain_m: number;
-  restroom: RestroomInfo;
-  matched: boolean;
-  off_route_distance_m: number;
   distance_error_m: number;
-  mile_range_error_m: number;
-  distance_error_norm: number;
-  mile_range_error_norm: number;
-  elevation_mismatch: number;
+  distance_constraint_satisfied: boolean;
+
+  constraints_satisfied: boolean;
+  requirements_satisfied_count: number;
+  requirements_total: number;
+  facility_results: FacilityResultOut[];
+
+  // The backend also sends `elevation_gain_m`, but the underlying
+  // elevation data isn't accurate enough to surface to users -- it's
+  // deliberately omitted from this type. See explanations.ts.
   repeated_segment_ratio: number;
-  restroom_confidence: number;
-  similarity_penalty: number;
-  composite_score: number;
-  signal_count: number;
-  crossing_count: number;
-  longest_uninterrupted_m: number;
-  signals_per_km: number;
   pedestrian_path_ratio: number;
-  contains_stairs: boolean;
   sharp_turn_count: number;
   u_turn_count: number;
   compactness: number;
-  smoothed_gain_m: number;
-  climb_count: number;
-  longest_climb_m: number;
-  longest_climb_grade_pct: number;
-  max_grade_pct: number;
-  archetype: string | null;
+  quality_score: number;
 };
 
 export class ApiError extends Error {
@@ -126,17 +141,31 @@ function apiUrl(path: string): string {
   return API_BASE === "" ? `/api${path}` : `${API_BASE}${path}`;
 }
 
-export async function fetchRankedRoutes(
+const METERS_PER_MILE = 1609.34;
+
+export async function fetchRoutes(
   startPosition: [number, number],
   values: RouteFormValues,
-): Promise<RankedRoute[]> {
+): Promise<GenericRoute[]> {
+  const facilityRequirements: FacilityRequirementPayload[] =
+    values.facilityRequirements
+      .filter((requirement) => {
+        if (values.facilityMode === "none") return false;
+        if (values.facilityMode === "both") return true;
+        return requirement.kind === values.facilityMode;
+      })
+      .map((requirement) => ({
+        id: requirement.id,
+        kind: requirement.kind,
+        min_distance_m: requirement.minMile * METERS_PER_MILE,
+        max_distance_m: requirement.maxMile * METERS_PER_MILE,
+      }));
+
   const body: Record<string, unknown> = {
     start_lat: startPosition[0],
     start_lon: startPosition[1],
-    target_distance_m: values.targetDistanceMiles * 1609.34,
-    restroom_min_mile: values.restroomMinMile,
-    restroom_max_mile: values.restroomMaxMile,
-    elevation_preference: values.elevationPreference,
+    target_distance_m: values.targetDistanceMiles * METERS_PER_MILE,
+    facility_requirements: facilityRequirements,
     shape: values.shape,
   };
 
@@ -148,14 +177,10 @@ export async function fetchRankedRoutes(
     body.run_time = values.runTime;
   }
 
-  if (values.workoutType !== "") {
-    body.workout_type = values.workoutType;
-  }
-
   let response: Response;
 
   try {
-    response = await fetch(apiUrl("/routes/with-restroom"), {
+    response = await fetch(apiUrl("/routes"), {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
@@ -185,5 +210,5 @@ export async function fetchRankedRoutes(
     throw new ApiError(message, response.status, isValidationError);
   }
 
-  return (await response.json()) as RankedRoute[];
+  return (await response.json()) as GenericRoute[];
 }

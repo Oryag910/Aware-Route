@@ -7,11 +7,16 @@ from typing import Annotated, Literal
 
 from fastapi import Depends, FastAPI, HTTPException, Response
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
-from app.amenities.fountains import fountain_to_amenity, get_fountains
+from app.amenities.fountains import Fountain, fountain_to_amenity, get_fountains
 from app.amenities.models import Amenity
 from app.amenities.snapping import snap_amenities
+from app.facilities.catalog import load_facility_catalog
+from app.facilities.models import FacilityKind, FacilityRequirement, RequirementResult
+from app.facilities.oab_planner import plan_constrained_out_and_back
+from app.facilities.orchestration import ConstrainedPlanner, ScoredRoute, plan_routes
+from app.facilities.round_planner import plan_constrained_round
 from app.flow.interruptions import (
     InterruptionStore,
     get_interruption_store as _get_interruption_store,
@@ -118,6 +123,22 @@ RESTROOM_FIRST_CANDIDATE_LIMIT = 4
 # rescue band, so they'd only ever clutter the fallback ranking and
 # displace genuinely-close candidates -- drop them outright.
 MAX_CANDIDATE_DISTANCE_RATIO = 3.0
+
+# Server-side abuse/performance safety ceiling on the generic /routes
+# endpoint's facility_requirements list -- deliberately generous (not a
+# low product-level assumption baked into the architecture, which is
+# variable-length by construction) so it only ever protects
+# infrastructure, never a real product ask.
+MAX_FACILITY_REQUIREMENTS = 20
+
+# Constrained planners /routes falls back to when natural matching alone
+# doesn't yield enough fully valid candidates (see
+# app/facilities/orchestration.py's plan_routes). Each is a no-op for
+# shapes/requirements it doesn't apply to.
+DEFAULT_CONSTRAINED_PLANNERS: list[ConstrainedPlanner] = [
+    plan_constrained_round,
+    plan_constrained_out_and_back,
+]
 
 
 class RestroomRouteRequest(BaseModel):
@@ -398,6 +419,7 @@ def _build_local_responses(
 @app.post(
     "/routes/with-restroom",
     dependencies=[Depends(rate_limit_dependency)],
+    deprecated=True,
 )
 def get_routes_with_restroom(
     request: RestroomRouteRequest,
@@ -613,3 +635,268 @@ def get_routes_with_restroom(
         )
         for scored, archetype in zip(sliced_candidates, archetypes)
     ]
+
+
+# ---------------------------------------------------------------------------
+# Generic multi-facility /routes endpoint (PR #18).
+#
+# Replaces the single-restroom-range contract with a variable-length,
+# typed list of facility requirements. Local-engine only -- the ORS
+# pipeline cannot truthfully honor an arbitrary set of typed cumulative-
+# mile stops, so this endpoint never falls back to ORS (see module intro
+# in app/facilities/orchestration.py). /routes/with-restroom above keeps
+# its existing ORS-fallback behavior unchanged for backward compatibility.
+# ---------------------------------------------------------------------------
+
+
+class FacilityRequirementIn(BaseModel):
+    id: Annotated[str, Field(min_length=1)]
+    kind: FacilityKind
+    min_distance_m: Annotated[float, Field(ge=0)]
+    max_distance_m: Annotated[float, Field(gt=0)]
+
+
+class RouteRequest(BaseModel):
+    start_lat: float
+    start_lon: float
+    target_distance_m: Annotated[float, Field(gt=0)]
+    facility_requirements: Annotated[
+        list[FacilityRequirementIn],
+        Field(default_factory=list, max_length=MAX_FACILITY_REQUIREMENTS),
+    ]
+    shape: Literal["round", "out_and_back", "mix"] = "mix"
+    count: Annotated[int, Field(ge=1, le=5)] = 3
+    run_time: datetime | None = None
+
+    @model_validator(mode="after")
+    def _validate_requirements(self) -> "RouteRequest":
+        ids = [requirement.id for requirement in self.facility_requirements]
+        if len(ids) != len(set(ids)):
+            raise ValueError("facility_requirements ids must be unique")
+
+        for requirement in self.facility_requirements:
+            if requirement.max_distance_m <= requirement.min_distance_m:
+                raise ValueError(
+                    f"requirement {requirement.id}: max_distance_m must be "
+                    "greater than min_distance_m"
+                )
+            if requirement.max_distance_m > self.target_distance_m:
+                raise ValueError(
+                    f"requirement {requirement.id}: max_distance_m must be "
+                    "<= target_distance_m"
+                )
+
+        return self
+
+
+class FacilityOut(BaseModel):
+    id: str
+    kind: FacilityKind
+    name: str | None
+    status: str | None
+    hours_of_operation: str | None
+    latitude: float
+    longitude: float
+    mile_marker_m: float
+    off_route_distance_m: float
+    encounter_index: int
+
+
+class FacilityResultOut(BaseModel):
+    requirement_id: str
+    kind: FacilityKind
+    requested_min_m: float
+    requested_max_m: float
+    satisfied: bool
+    range_error_m: float | None
+    facility: FacilityOut | None
+
+
+class GenericRouteResponse(BaseModel):
+    geometry: tuple[RoutePoint, ...]
+    shape: Literal["round", "out_and_back"]
+
+    distance_m: float
+    distance_error_m: float
+    distance_constraint_satisfied: bool
+
+    constraints_satisfied: bool
+    requirements_satisfied_count: int
+    requirements_total: int
+    facility_results: list[FacilityResultOut]
+
+    elevation_gain_m: float
+    repeated_segment_ratio: float
+    pedestrian_path_ratio: float
+    sharp_turn_count: int
+    u_turn_count: int
+    compactness: float
+    quality_score: float
+
+
+def _restroom_loader() -> list[Restroom]:
+    """Lazily fetch Supabase restrooms -- only ever called when a
+    restroom requirement is actually present (see
+    `load_facility_catalog`), unlike the legacy endpoint's unconditional
+    FastAPI dependency."""
+    try:
+        client = get_supabase_client()
+        return fetch_eligible_restrooms(client)
+    except Exception as exc:
+        logger.exception(
+            "Failed to fetch restroom data from Supabase for /routes; "
+            "returning 503 to the client"
+        )
+        raise HTTPException(
+            status_code=503,
+            detail="Restroom data is temporarily unavailable",
+        ) from exc
+
+
+def _water_loader() -> list[Fountain]:
+    return get_fountains()
+
+
+def _facility_result_out(result: RequirementResult) -> FacilityResultOut:
+    facility_out: FacilityOut | None = None
+    if result.encounter is not None:
+        encounter = result.encounter
+        facility_out = FacilityOut(
+            id=encounter.facility.id,
+            kind=encounter.facility.kind,
+            name=encounter.facility.name,
+            status=encounter.facility.status,
+            hours_of_operation=encounter.facility.hours_of_operation,
+            latitude=encounter.facility.lat,
+            longitude=encounter.facility.lon,
+            mile_marker_m=encounter.mile_marker_m,
+            off_route_distance_m=encounter.distance_to_route_m,
+            encounter_index=encounter.encounter_index,
+        )
+
+    return FacilityResultOut(
+        requirement_id=result.requirement.id,
+        kind=result.requirement.kind,
+        requested_min_m=result.requirement.min_distance_m,
+        requested_max_m=result.requirement.max_distance_m,
+        satisfied=result.satisfied,
+        range_error_m=result.range_error_m,
+        facility=facility_out,
+    )
+
+
+def _generic_response(
+    scored: ScoredRoute,
+    original_order: dict[str, int],
+) -> GenericRouteResponse:
+    route = scored.route
+    candidate = route.candidate
+    quality = route.quality
+    geometry = candidate.geometry
+
+    shape = route.shape
+    assert shape in ("round", "out_and_back")
+
+    facility_results = [
+        _facility_result_out(result)
+        for result in scored.facility_score.requirement_results
+    ]
+    facility_results.sort(
+        key=lambda result: original_order.get(result.requirement_id, 0)
+    )
+
+    return GenericRouteResponse(
+        geometry=geometry,
+        shape=shape,
+        distance_m=candidate.distance_m,
+        distance_error_m=scored.distance_error_m,
+        distance_constraint_satisfied=scored.distance_error_m <= 100.0,
+        constraints_satisfied=scored.fully_valid,
+        requirements_satisfied_count=scored.facility_score.requirements_satisfied_count,
+        requirements_total=scored.facility_score.requirements_total,
+        facility_results=facility_results,
+        elevation_gain_m=quality.elevation_gain_m or 0.0,
+        repeated_segment_ratio=quality.edge_reuse_ratio,
+        pedestrian_path_ratio=quality.pedestrian_share,
+        sharp_turn_count=sharp_turn_count(geometry),
+        u_turn_count=u_turn_count(geometry),
+        compactness=compactness(geometry),
+        quality_score=scored.quality_score,
+    )
+
+
+@app.post(
+    "/routes",
+    dependencies=[Depends(rate_limit_dependency)],
+)
+def get_routes(
+    request: RouteRequest,
+    response: Response,
+) -> list[GenericRouteResponse]:
+    """Generic multi-facility route generation. Always uses the local
+    engine (never ORS -- see module docstring above); an unavailable
+    local graph is an honest 503, never a silent ORS fallback."""
+    try:
+        graph = get_graph()
+    except Exception as exc:
+        logger.exception("Local graph failed to load for /routes")
+        raise HTTPException(
+            status_code=503,
+            detail="Routing engine is temporarily unavailable",
+        ) from exc
+
+    requirements = [
+        FacilityRequirement(
+            id=requirement.id,
+            kind=requirement.kind,
+            min_distance_m=requirement.min_distance_m,
+            max_distance_m=requirement.max_distance_m,
+        )
+        for requirement in request.facility_requirements
+    ]
+    original_order = {
+        requirement.id: index for index, requirement in enumerate(requirements)
+    }
+    run_time = request.run_time or datetime.now()
+
+    # Raises 503 via _restroom_loader only when a restroom requirement
+    # is actually present -- water-only/no-facility requests never touch
+    # Supabase (see load_facility_catalog's conditional loading).
+    facilities = load_facility_catalog(
+        requirements,
+        restroom_loader=_restroom_loader,
+        water_loader=_water_loader,
+        run_time=run_time,
+    )
+
+    start = Coordinate(lat=request.start_lat, lon=request.start_lon)
+
+    try:
+        scored = plan_routes(
+            graph,
+            start,
+            request.target_distance_m,
+            request.shape,
+            request.count,
+            requirements,
+            facilities,
+            constrained_planners=DEFAULT_CONSTRAINED_PLANNERS,
+        )
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.exception("Local route generation failed for /routes")
+        raise HTTPException(
+            status_code=502,
+            detail="Route generation failed unexpectedly",
+        ) from exc
+
+    if not scored:
+        raise HTTPException(
+            status_code=422,
+            detail="No candidate route could be constructed for this request",
+            headers={"X-Route-Engine": "local"},
+        )
+
+    response.headers["X-Route-Engine"] = "local"
+    return [_generic_response(s, original_order) for s in scored]

@@ -6,6 +6,9 @@ services:
     dockerfilePath: ./backend/Dockerfile
     dockerContext: ./backend
     healthCheckPath: /health
+    previews:
+      generation: automatic
+      plan: free
     envVars:
       - key: ORS_API_KEY
         sync: false

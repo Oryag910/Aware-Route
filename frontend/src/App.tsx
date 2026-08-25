@@ -3,8 +3,8 @@ import { useRef, useState } from "react";
 import {
   ApiError,
   NetworkError,
-  fetchRankedRoutes,
-  type RankedRoute,
+  fetchRoutes,
+  type GenericRoute,
 } from "./api";
 import AwareMark from "./components/AwareMark";
 import BottomSheet, { type SheetSnap } from "./components/BottomSheet";
@@ -22,12 +22,6 @@ const SHAPE_LABELS: Record<string, string> = {
   out_and_back: "Out & back",
 };
 
-const ARCHETYPE_LABELS: Record<string, string> = {
-  best_overall: "Best overall",
-  smoothest: "Smoothest",
-  most_scenic: "Most scenic",
-};
-
 // How long a request runs before the loading state admits the demo backend
 // may be waking up from inactivity, rather than just "still searching."
 const SLOW_LOADING_MS = 9000;
@@ -37,7 +31,7 @@ type ErrorKind =
   | "no_route"
   | "validation"
   | "rate_limited"
-  | "restroom_unavailable"
+  | "facility_data_unavailable"
   | "routing_unavailable"
   | "network"
   | "server";
@@ -58,7 +52,7 @@ function classifyError(caughtError: unknown): AppError {
       case 429:
         return { kind: "rate_limited" };
       case 503:
-        return { kind: "restroom_unavailable" };
+        return { kind: "facility_data_unavailable" };
       case 502:
         return { kind: "routing_unavailable" };
       default:
@@ -76,7 +70,7 @@ function App() {
     [number, number] | null
   >(null);
 
-  const [results, setResults] = useState<RankedRoute[] | null>(null);
+  const [results, setResults] = useState<GenericRoute[] | null>(null);
   const [selectedRouteIndex, setSelectedRouteIndex] = useState<number | null>(
     null,
   );
@@ -113,9 +107,9 @@ function App() {
     }, SLOW_LOADING_MS);
 
     try {
-      const rankedRoutes = await fetchRankedRoutes(selectedPosition, values);
-      setResults(rankedRoutes);
-      setSelectedRouteIndex(rankedRoutes.length > 0 ? 0 : null);
+      const routes = await fetchRoutes(selectedPosition, values);
+      setResults(routes);
+      setSelectedRouteIndex(routes.length > 0 ? 0 : null);
       setShowForm(false);
     } catch (caughtError) {
       setAppError(classifyError(caughtError));
@@ -179,12 +173,18 @@ function App() {
       </div>
     ) : null;
 
+  const requirementsSummary =
+    lastValues !== null && lastValues.facilityRequirements.length > 0
+      ? `${lastValues.facilityRequirements.length} required stop${
+          lastValues.facilityRequirements.length === 1 ? "" : "s"
+        } · `
+      : "";
+
   const formSummary =
     lastValues !== null ? (
       <div className="flex items-center justify-between gap-2 rounded-lg bg-surface-muted px-3 py-2 text-sm text-ink-muted">
         <span className="truncate">
-          {lastValues.targetDistanceMiles} mi · {lastValues.restroomMinMile}–
-          {lastValues.restroomMaxMile} mi ·{" "}
+          {lastValues.targetDistanceMiles} mi · {requirementsSummary}
           {SHAPE_LABELS[lastValues.shape] ?? lastValues.shape}
         </span>
         <button
@@ -217,7 +217,7 @@ function App() {
         >
           {isSlowLoading
             ? "The demo server may be waking up after inactivity. Your request is still running."
-            : "Finding routes that fit your distance, shape, and restroom preferences."}
+            : "Finding routes that fit your distance, shape, and facility preferences."}
         </StatusMessage>
       )}
 
@@ -230,11 +230,11 @@ function App() {
       {appError?.kind === "no_route" && (
         <StatusMessage
           variant="info"
-          heading="No route found in that range"
+          heading="No route found for those settings"
           actions={
             <>
               <InlineAction onClick={() => setShowForm(true)}>
-                Widen restroom range
+                Adjust settings
               </InlineAction>
               <InlineAction onClick={handleClearStart}>
                 Choose a new start
@@ -243,8 +243,8 @@ function App() {
           }
         >
           We couldn't build a route that fits your target distance and
-          restroom range. Try a wider mileage range, or drop the pin
-          somewhere else.
+          requested stops. Try a wider distance or facility mile range, or
+          drop the pin somewhere else.
         </StatusMessage>
       )}
 
@@ -261,10 +261,10 @@ function App() {
         </StatusMessage>
       )}
 
-      {appError?.kind === "restroom_unavailable" && (
+      {appError?.kind === "facility_data_unavailable" && (
         <StatusMessage
           variant="danger"
-          heading="Restroom data is temporarily unavailable"
+          heading="Facility data is temporarily unavailable"
           actions={
             lastValues !== null ? (
               <InlineAction onClick={() => void runSearch(lastValues)}>
@@ -273,7 +273,7 @@ function App() {
             ) : undefined
           }
         >
-          We couldn't load the restroom data needed to build this route. Try
+          We couldn't load the facility data needed to build this route. Try
           again in a moment.
         </StatusMessage>
       )}
@@ -348,8 +348,6 @@ function App() {
       </button>
       <p className="mt-1.5 text-center text-xs text-ink-muted">
         Route {selectedRouteIndex! + 1}
-        {selectedRoute.archetype !== null &&
-          ` · ${ARCHETYPE_LABELS[selectedRoute.archetype] ?? selectedRoute.archetype}`}
       </p>
     </>
   );
@@ -365,9 +363,9 @@ function App() {
             {isDesktop ? "Click" : "Tap"} the map to set your start
           </h2>
           <p className="mt-1 text-sm text-ink-muted">
-            We'll build routes around your target distance and requested
-            restroom range. If no restroom match is available, a water
-            fountain may appear as a fallback.
+            We'll build routes around your target distance. Optionally,
+            request restroom and water stops within specific mile ranges —
+            you can ask for multiple of each.
           </p>
         </div>
       </div>
