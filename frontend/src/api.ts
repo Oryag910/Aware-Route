@@ -161,7 +161,6 @@ export async function fetchRoutes(
     start_lon: startPosition[1],
     target_distance_m: values.targetDistanceMiles * METERS_PER_MILE,
     facility_requirements: facilityRequirements,
-    elevation_preference: values.elevationPreference,
     shape: values.shape,
   };
 
@@ -171,10 +170,6 @@ export async function fetchRoutes(
   // string-backed inputs in RouteForm.
   if (values.runTime !== "") {
     body.run_time = values.runTime;
-  }
-
-  if (values.workoutType !== "") {
-    body.workout_type = values.workoutType;
   }
 
   let response: Response;

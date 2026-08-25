@@ -346,3 +346,61 @@ def test_no_json_infinity_in_response(monkeypatch: pytest.MonkeyPatch) -> None:
     )
     assert response.status_code == 200, response.text
     assert "Infinity" not in response.text
+
+
+def test_stale_elevation_and_workout_fields_do_not_affect_routing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Elevation preference and workout type are not mature enough to be
+    part of the product yet (see app/main.py's RouteRequest) and must
+    never influence /routes generation or ranking. A client still
+    sending stale values for them -- e.g. a cached old frontend build --
+    must get byte-identical results to a client that omits them
+    entirely."""
+    monkeypatch.setattr("app.main.get_fountains", lambda: [])
+    monkeypatch.setattr(
+        "app.main.fetch_eligible_restrooms", lambda client: []  # noqa: ARG005
+    )
+    monkeypatch.setattr("app.main.get_supabase_client", lambda: object())
+
+    base_body = {
+        **START,
+        "target_distance_m": 8000.0,
+        "facility_requirements": [],
+        "shape": "mix",
+        "count": 3,
+    }
+
+    baseline = client.post("/routes", json=base_body)
+    assert baseline.status_code == 200, baseline.text
+
+    stale_a = client.post(
+        "/routes",
+        json={
+            **base_body,
+            "elevation_preference": "flat",
+            "workout_type": "tempo",
+        },
+    )
+    stale_b = client.post(
+        "/routes",
+        json={
+            **base_body,
+            "elevation_preference": "hilly",
+            "workout_type": "easy",
+        },
+    )
+
+    assert stale_a.status_code == 200, stale_a.text
+    assert stale_b.status_code == 200, stale_b.text
+    assert stale_a.json() == baseline.json()
+    assert stale_b.json() == baseline.json()
+
+
+def test_route_request_schema_excludes_elevation_and_workout() -> None:
+    """The active /routes request model must not expose either
+    not-yet-mature input as a real field -- see module docstring."""
+    schema = client.get("/openapi.json").json()
+    route_request_schema = schema["components"]["schemas"]["RouteRequest"]["properties"]
+    assert "elevation_preference" not in route_request_schema
+    assert "workout_type" not in route_request_schema

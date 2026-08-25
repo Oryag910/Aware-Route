@@ -3,8 +3,6 @@ import { useState, type FormEvent } from "react";
 import StatusMessage from "./StatusMessage";
 import { X } from "../icons";
 
-export type ElevationPreference = "flat" | "moderate" | "hilly" | "any";
-
 export type RouteShape = "round" | "out_and_back" | "mix";
 
 export type FacilityKind = "restroom" | "water";
@@ -22,10 +20,8 @@ export type RouteFormValues = {
   targetDistanceMiles: number;
   facilityMode: FacilityMode;
   facilityRequirements: FacilityRequirementForm[];
-  elevationPreference: ElevationPreference;
   shape: RouteShape;
   runTime: string;
-  workoutType: string;
 };
 
 type RouteFormProps = {
@@ -74,11 +70,8 @@ export default function RouteForm({
   const [facilityRequirements, setFacilityRequirements] = useState<
     FacilityRequirementForm[]
   >([makeRequirement("restroom")]);
-  const [elevationPreference, setElevationPreference] =
-    useState<ElevationPreference>("moderate");
   const [shape, setShape] = useState<RouteShape>("mix");
   const [runTime, setRunTime] = useState("");
-  const [workoutType, setWorkoutType] = useState("");
   const [formError, setFormError] = useState<string | null>(null);
 
   function handleModeChange(nextMode: FacilityMode) {
@@ -196,10 +189,8 @@ export default function RouteForm({
       targetDistanceMiles: distance,
       facilityMode,
       facilityRequirements: requirements,
-      elevationPreference,
       shape,
       runTime,
-      workoutType,
     });
   }
 
@@ -373,46 +364,6 @@ export default function RouteForm({
             </div>
           )}
         </fieldset>
-
-        <div>
-          <label htmlFor="elevation-preference" className={labelClass}>
-            Elevation
-          </label>
-          <select
-            id="elevation-preference"
-            value={elevationPreference}
-            onChange={(event) =>
-              setElevationPreference(
-                event.target.value as ElevationPreference,
-              )
-            }
-            className={controlClass}
-          >
-            <option value="flat">Flat</option>
-            <option value="moderate">Moderate</option>
-            <option value="hilly">Hilly</option>
-            <option value="any">Doesn't matter</option>
-          </select>
-        </div>
-
-        <div>
-          <label htmlFor="workout-type" className={labelClass}>
-            Workout type
-          </label>
-          <select
-            id="workout-type"
-            value={workoutType}
-            onChange={(event) => setWorkoutType(event.target.value)}
-            className={controlClass}
-          >
-            <option value="">Any run</option>
-            <option value="easy">Easy</option>
-            <option value="tempo">Tempo</option>
-            <option value="long">Long</option>
-            <option value="hills">Hills</option>
-            <option value="intervals">Intervals</option>
-          </select>
-        </div>
 
         <div className="sm:col-span-2">
           <label htmlFor="run-time" className={labelClass}>

@@ -664,13 +664,9 @@ class RouteRequest(BaseModel):
         list[FacilityRequirementIn],
         Field(default_factory=list, max_length=MAX_FACILITY_REQUIREMENTS),
     ]
-    elevation_preference: Literal["flat", "moderate", "hilly", "any"] = "any"
     shape: Literal["round", "out_and_back", "mix"] = "mix"
     count: Annotated[int, Field(ge=1, le=5)] = 3
     run_time: datetime | None = None
-    workout_type: Literal[
-        "easy", "tempo", "long", "hills", "intervals"
-    ] | None = None
 
     @model_validator(mode="after")
     def _validate_requirements(self) -> "RouteRequest":

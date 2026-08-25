@@ -1,6 +1,6 @@
 # Aware
 
-A Manhattan running/walking route planner with a custom local routing engine — routes are generated to hit a target distance, pass any number of requested restroom and/or water stops within their own requested mile ranges, and match a shape and elevation preference, then ranked and returned with GPX export.
+A Manhattan running/walking route planner with a custom local routing engine — routes are generated to hit a target distance, pass any number of requested restroom and/or water stops within their own requested mile ranges, and match a requested shape, then ranked and returned with GPX export.
 
 <!-- TODO: add product demo GIF -->
 
@@ -14,7 +14,6 @@ GitHub: [Oryag910/Aware-Route](https://github.com/Oryag910/Aware-Route)
 - Target running/walking distance, tuned toward the requested value
 - Any number of typed facility requirements, each with its own mile range (e.g. "a restroom between mile 2 and 4, water between mile 6 and 8") — or none at all
 - Route shape: round trip, out-and-back, or mixed
-- Elevation preference: flat, moderate, hilly, or any
 - Ranked route alternatives, not just a single result
 - Every requested stop shown per-route with its own satisfied/unsatisfied status, matched facility name, and cumulative mile marker
 - GPX export for use in other running/GPS apps
