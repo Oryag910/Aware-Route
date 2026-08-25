@@ -33,7 +33,6 @@ export function routeFacts(route: GenericRoute): string[] {
   const facts: string[] = [];
 
   facts.push(`${formatMiles(route.distance_m)} mi`);
-  facts.push(`${Math.round(route.elevation_gain_m)} m elevation gain`);
   facts.push(
     `${Math.round(route.pedestrian_path_ratio * 100)}% park/pedestrian paths`,
   );
@@ -61,17 +60,6 @@ export function tradeoffLine(
       upside = `${percent}% more park paths`;
     } else if (parkDelta < 0 && downside === null) {
       downside = `${percent}% less park paths`;
-    }
-  }
-
-  const elevationDelta = route.elevation_gain_m - best.elevation_gain_m;
-  if (Math.abs(elevationDelta) >= 10) {
-    const meters = Math.round(Math.abs(elevationDelta));
-
-    if (elevationDelta > 0 && downside === null) {
-      downside = `${meters} m more elevation gain`;
-    } else if (elevationDelta < 0 && upside === null) {
-      upside = `${meters} m less elevation gain`;
     }
   }
 

@@ -1,9 +1,12 @@
 import type { RouteFormValues } from "./components/RouteForm";
 
+// The backend also sends `elevation_m` per point, but the underlying
+// elevation data isn't accurate enough to surface to users -- it's
+// deliberately omitted from this type so nothing in the frontend can
+// display or export it. See gpx.ts and explanations.ts.
 export type RoutePoint = {
   lat: number;
   lon: number;
-  elevation_m: number;
 };
 
 // Public facility vocabulary the backend exposes ("water", not the legacy
@@ -53,7 +56,9 @@ export type GenericRoute = {
   requirements_total: number;
   facility_results: FacilityResultOut[];
 
-  elevation_gain_m: number;
+  // The backend also sends `elevation_gain_m`, but the underlying
+  // elevation data isn't accurate enough to surface to users -- it's
+  // deliberately omitted from this type. See explanations.ts.
   repeated_segment_ratio: number;
   pedestrian_path_ratio: number;
   sharp_turn_count: number;

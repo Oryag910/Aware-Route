@@ -1,11 +1,10 @@
 import type { GenericRoute } from "./api";
 
 export function buildGpx(route: GenericRoute, name: string): string {
+  // Elevation is deliberately not exported -- the underlying elevation
+  // data isn't accurate enough to surface to users.
   const trackPoints = route.geometry
-    .map(
-      (point) =>
-        `<trkpt lat="${point.lat}" lon="${point.lon}"><ele>${point.elevation_m}</ele></trkpt>`,
-    )
+    .map((point) => `<trkpt lat="${point.lat}" lon="${point.lon}"/>`)
     .join("\n");
 
   // Satisfied facility stops become GPX waypoints -- a nice-to-have so the
