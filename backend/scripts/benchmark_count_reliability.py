@@ -48,8 +48,17 @@ class CountResult:
     exact_count_fulfilled: bool
     time_s: float
     within_tolerance_count: int
+    all_within_tolerance: bool
     pairwise_overlaps: tuple[float, ...]
     error: str | None
+
+    @property
+    def exact_count_all_within_tolerance(self) -> bool:
+        """The product-facing target: exactly `requested_count` routes
+        returned AND every one of them within tolerance -- stronger than
+        either metric alone (see PR discussion: exact-count fulfillment
+        alone can hide a batch where extra alternatives miss distance)."""
+        return self.exact_count_fulfilled and self.all_within_tolerance
 
 
 def run_one(graph: Any, scenario: Scenario, count: int) -> CountResult:
@@ -70,6 +79,7 @@ def run_one(graph: Any, scenario: Scenario, count: int) -> CountResult:
         for s in scored
         if abs(s.route.candidate.distance_m - target_m) <= TOLERANCE_M
     )
+    all_within = bool(scored) and within == len(scored)
     signatures = [route_segment_signature(s.route.candidate.geometry) for s in scored]
     overlaps = tuple(
         segment_overlap(signatures[i], signatures[j])
@@ -86,6 +96,7 @@ def run_one(graph: Any, scenario: Scenario, count: int) -> CountResult:
         exact_count_fulfilled=len(scored) == count,
         time_s=elapsed,
         within_tolerance_count=within,
+        all_within_tolerance=all_within,
         pairwise_overlaps=overlaps,
         error=error,
     )
@@ -101,6 +112,10 @@ def _percentile(values: list[float], pct: float) -> float:
 
 def _bucket_row(shape: str, bucket: list[CountResult]) -> str:
     exact_pct = 100.0 * sum(r.exact_count_fulfilled for r in bucket) / len(bucket)
+    all_within_pct = 100.0 * sum(r.all_within_tolerance for r in bucket) / len(bucket)
+    exact_and_all_within_pct = (
+        100.0 * sum(r.exact_count_all_within_tolerance for r in bucket) / len(bucket)
+    )
     median_returned = statistics.median(r.returned_count for r in bucket)
     ones = sum(1 for r in bucket if r.returned_count == 1)
     twos = sum(1 for r in bucket if r.returned_count == 2)
@@ -119,7 +134,8 @@ def _bucket_row(shape: str, bucket: list[CountResult]) -> str:
     p95_latency = _percentile(latencies, 95.0)
 
     return (
-        f"| {shape} | {len(bucket)} | {exact_pct:.1f}% | {median_returned:.1f} | "
+        f"| {shape} | {len(bucket)} | {exact_pct:.1f}% | {all_within_pct:.1f}% | "
+        f"{exact_and_all_within_pct:.1f}% | {median_returned:.1f} | "
         f"{ones} | {twos} | {within_rate:.1f}% | {median_overlap_str} | "
         f"{median_latency:.3f}s | {p95_latency:.3f}s |"
     )
@@ -159,11 +175,12 @@ def build_report(results: list[CountResult]) -> str:
         lines.append(f"## requested count = {count}")
         lines.append("")
         lines.append(
-            "| shape | scenarios | exact-count % | median returned | "
-            "returned==1 | returned==2 | within-100m rate | median overlap | "
+            "| shape | scenarios | exact-count % | all-returned-within-100m % | "
+            "exact-count AND all-within-100m % | median returned | "
+            "returned==1 | returned==2 | candidate within-100m rate | median overlap | "
             "median latency | p95 latency |"
         )
-        lines.append("|---|---|---|---|---|---|---|---|---|---|")
+        lines.append("|---|---|---|---|---|---|---|---|---|---|---|---|")
         for shape in (*SHAPES, "ALL"):
             bucket = (
                 bucket_all if shape == "ALL" else [r for r in bucket_all if r.shape == shape]

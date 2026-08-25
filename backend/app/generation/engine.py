@@ -3,7 +3,7 @@ from typing import Any, Literal, cast
 
 from app.amenities.snapping import SnappedAmenity
 from app.generation.amenity_first import through_amenities_pairs
-from app.generation.length_tune import tune_generator_pairs_to_target
+from app.generation.length_tune import DEFAULT_TOLERANCE_M, tune_generator_pairs_to_target
 from app.generation.out_and_back import out_and_back_pairs
 from app.generation.polygon_amenity import polygon_loop_through_amenities_pairs
 from app.generation.polygon_loop import polygon_loop_pairs
@@ -65,7 +65,7 @@ def _tuned_pairs(
         if shape == "round":
             return round_pairs(
                 graph, start_node, dists, target_distance_m, count, radius_scale,
-                paths,
+                paths, tolerance_m=DEFAULT_TOLERANCE_M,
             )
         return out_and_back_pairs(
             graph, start_node, dists, target_distance_m, count, radius_scale,

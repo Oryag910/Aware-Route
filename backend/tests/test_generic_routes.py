@@ -457,25 +457,30 @@ def test_no_facilities_mix_includes_both_shapes_when_count_allows() -> None:
     assert shapes == {"round", "out_and_back"}
 
 
-def test_no_facilities_at_least_one_route_within_tolerance() -> None:
-    """Matches the existing benchmark's own success criterion
-    (`ScenarioResult.any_within_tolerance` in scripts/benchmark_suite.py):
-    at least one returned candidate within +/-100m, not necessarily
-    every candidate in a diverse count>1 pool -- `select_diverse`/
-    `rank_key` (deliberately unchanged by this fix) already rank
-    within-tolerance candidates first and only reach for a
-    slightly-off one to fill out `count` once genuinely closer
-    alternatives run out."""
+@pytest.mark.parametrize("shape", ["round", "out_and_back", "mix"])
+@pytest.mark.parametrize("miles", [3.0, 8.0])
+def test_no_facilities_all_routes_within_tolerance(shape: str, miles: float) -> None:
+    """Exact-count fulfillment alone is too weak a regression check: the
+    count-reliability benchmark showed round-shape requests reliably
+    returning 3 routes while one of them missed +/-100m (a batch-level
+    `radius_scale` picked to fit the closest candidate left OTHER
+    turnarounds' independently-varying reuse-penalized return legs
+    overshooting -- see app.generation.round_route._correct_overshoot).
+    For an ordinary Manhattan request with plenty of graph alternatives
+    (Central Park, 3/8mi), the product should not settle for "count
+    satisfied, quality not" -- every returned route must be within
+    tolerance, not just at least one."""
     response = client.post(
         "/routes",
         json={
             **_CENTRAL_PARK,
-            "target_distance_m": 3.0 * MILES_TO_METERS,
+            "target_distance_m": miles * MILES_TO_METERS,
             "facility_requirements": [],
-            "shape": "round",
+            "shape": shape,
             "count": 3,
         },
     )
     assert response.status_code == 200, response.text
     routes = response.json()
-    assert any(route["distance_constraint_satisfied"] for route in routes)
+    assert len(routes) == 3
+    assert all(route["distance_constraint_satisfied"] for route in routes), routes
