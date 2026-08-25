@@ -13,6 +13,18 @@ from app.routing.errors import RouteNotFoundError
 from app.routing.provider import Coordinate, RouteCandidate
 
 
+# Upper bound on how many turnarounds actually get a full return-leg
+# Dijkstra (`reuse_penalized_return_path`) per call, independent of how
+# large `count` grows for an overcomplete candidate pool. Without this,
+# an overcomplete pool request (e.g. facility-free routing asking for a
+# raw pool wider than the final result count) would multiply real Dijkstra
+# searches by `count * 2` on every radius-scale tuning iteration -- the
+# turnaround fix (see app.generation.turnarounds) means that multiplier
+# is no longer throttled by accidental sector starvation, so it needs an
+# explicit ceiling to keep latency bounded.
+MAX_TURNAROUND_ATTEMPTS = 10
+
+
 def round_pairs(
     graph: Any,
     start_node: int,
@@ -34,7 +46,7 @@ def round_pairs(
         start_node,
         dists,
         target_radius_m,
-        count * 2,
+        min(count * 2, MAX_TURNAROUND_ATTEMPTS),
         prefer_straight=False,
     )
 

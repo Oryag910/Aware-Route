@@ -40,6 +40,21 @@ Shape = Literal["round", "out_and_back", "mix"]
 NATURAL_POOL_MULTIPLIER = 4
 NATURAL_POOL_CEILING = 16
 
+# No-facility mode skips Supabase, snapping, encounters, assignment, and
+# every constrained planner -- the only extra cost of overcompleting its
+# pool is ordinary graph-route construction, which is cheap enough to
+# afford a modest cushion. Without this, `select_diverse` and the
+# generic scorer had exactly `count` raw candidates to work with and no
+# room to recover when one turned out overlapping/invalid -- the same
+# problem `NATURAL_POOL_MULTIPLIER` already solves for the
+# with-requirements path, just never applied when there were zero
+# requirements to satisfy. Smaller than the facility-matching multiplier
+# since natural matching has no hard constraint to hunt for -- distance
+# tuning and turnaround diversity are the only sources of "wasted"
+# candidates here.
+NO_FACILITY_POOL_MULTIPLIER = 3
+NO_FACILITY_POOL_CEILING = 10
+
 
 @dataclass(frozen=True)
 class ScoredRoute:
@@ -111,16 +126,28 @@ def natural_match_pool(
     count: int,
     requirements: list[FacilityRequirement],
 ) -> list[GeneratedRoute]:
-    """`requirements=[]` is a direct fast path: exactly `count` candidates,
-    identical to the pre-PR#18 no-facility call shape -- no latency cost
-    from a facility search nobody asked for. Any real requirement widens
-    the pool so natural matching has enough candidates to find one that
-    already happens to pass every requested stop."""
+    """`requirements=[]` skips every facility-matching cost (Supabase,
+    snapping, encounters, assignment, constrained planners) -- but still
+    asks for a modest overcomplete pool of ordinary graph-route
+    candidates (see `NO_FACILITY_POOL_MULTIPLIER`/`_CEILING`) so
+    `select_diverse` has real alternatives to choose `count` genuinely
+    distinct routes from, instead of hoping exactly `count` raw
+    candidates all survive construction and diversity filtering. Any
+    real requirement widens the pool further so natural matching has
+    enough candidates to find one that already happens to pass every
+    requested stop."""
     if not requirements:
-        return generate_routes(graph, start, target_distance_m, shape, count)
+        pool_size = min(
+            NO_FACILITY_POOL_CEILING, max(count * NO_FACILITY_POOL_MULTIPLIER, count)
+        )
+        return generate_routes(
+            graph, start, target_distance_m, shape, pool_size, result_count=pool_size
+        )
 
     pool_size = min(NATURAL_POOL_CEILING, max(count * NATURAL_POOL_MULTIPLIER, count))
-    return generate_routes(graph, start, target_distance_m, shape, pool_size)
+    return generate_routes(
+        graph, start, target_distance_m, shape, pool_size, result_count=pool_size
+    )
 
 
 # count -> (round, out_and_back) target allocation for "mix" requests

@@ -47,3 +47,37 @@ def _add_bidirectional(
 ) -> None:
     graph.add_edge(u, v, key=0, length=length)
     graph.add_edge(v, u, key=0, length=length)
+
+
+# Nodes clustered inside a SINGLE 45-degree bearing sector (sector 0:
+# bearings [0, 45)) at the same target radius (1000m) -- exercises the
+# fallback path in `select_turnarounds` when one sector holds every
+# eligible candidate, the exact starvation pattern real Manhattan graphs
+# hit near peninsula tips/graph boundaries (see PR notes on
+# `app.generation.turnarounds`). `select_turnarounds` only reads node
+# coordinates (`node_coordinate`) and the caller-supplied `dists` dict --
+# it never traverses graph edges -- so this fixture only needs nodes, no
+# edges.
+DENSE_SECTOR_NODES: tuple[tuple[int, float, float], ...] = (
+    # (node_id, bearing_deg, dist_m)
+    (201, 2.0, 1000.0),   # pass-1 winner: lowest id, ties on radius_gap=0
+    (202, 2.05, 1000.0),  # ~0.9m from 201 -- adjacent junk, must be rejected
+    (203, 20.0, 1000.0),  # ~314m from 201 -- genuinely separated fallback pick
+    (204, 38.0, 1000.0),  # ~314m from 203, ~628m from 201 -- another fallback pick
+)
+
+
+@pytest.fixture
+def dense_sector_graph() -> nx.MultiDiGraph:
+    graph = nx.MultiDiGraph(crs="epsg:4326")
+    graph.add_node(ORIGIN_NODE, x=ORIGIN.lon, y=ORIGIN.lat)
+
+    for node_id, bearing, dist in DENSE_SECTOR_NODES:
+        point = destination_point(ORIGIN, bearing, dist)
+        graph.add_node(node_id, x=point.lon, y=point.lat)
+
+    return graph
+
+
+def dense_sector_dists() -> dict[int, float]:
+    return {node_id: dist for node_id, _bearing, dist in DENSE_SECTOR_NODES}

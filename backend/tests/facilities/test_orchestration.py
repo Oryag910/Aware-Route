@@ -12,7 +12,12 @@ from app.generation.routes import GeneratedRoute, QualityMetrics
 from app.routing.provider import Coordinate, RouteCandidate, RoutePoint
 
 
-def test_no_requirements_requests_exactly_count_candidates() -> None:
+def test_no_requirements_requests_bounded_overcomplete_pool() -> None:
+    """`requirements=[]` still skips every facility-matching cost, but no
+    longer asks for exactly `count` raw candidates -- an overcomplete
+    pool (see `NO_FACILITY_POOL_MULTIPLIER`/`_CEILING`) gives
+    `select_diverse` real alternatives instead of hoping all `count` raw
+    candidates survive construction and diversity filtering."""
     graph = object()
     with patch("app.facilities.orchestration.generate_routes") as mocked:
         mocked.return_value = []
@@ -24,7 +29,28 @@ def test_no_requirements_requests_exactly_count_candidates() -> None:
             count=3,
             requirements=[],
         )
-        mocked.assert_called_once_with(graph, Coordinate(lat=40.0, lon=-73.0), 8000.0, "mix", 3)
+        args, kwargs = mocked.call_args
+        called_pool_size = args[4]
+        assert called_pool_size > 3
+        assert kwargs.get("result_count") == called_pool_size
+
+
+def test_no_requirements_pool_size_bounded_independent_of_count() -> None:
+    """The overcomplete pool is bounded (`NO_FACILITY_POOL_CEILING`), not
+    a fixed multiple of `count` -- latency shouldn't grow unbounded for
+    the API's max count."""
+    with patch("app.facilities.orchestration.generate_routes") as mocked:
+        mocked.return_value = []
+        natural_match_pool(
+            graph=object(),
+            start=Coordinate(lat=40.0, lon=-73.0),
+            target_distance_m=8000.0,
+            shape="mix",
+            count=5,
+            requirements=[],
+        )
+        called_pool_size = mocked.call_args[0][4]
+        assert 5 < called_pool_size <= 10
 
 
 def test_with_requirements_requests_overcomplete_pool() -> None:
