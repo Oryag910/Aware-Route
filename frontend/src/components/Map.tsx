@@ -5,13 +5,33 @@ import {
   MapContainer,
   Marker,
   Polyline,
-  TileLayer,
   useMap,
   useMapEvents,
 } from "react-leaflet";
 
 import type { FacilityResultOut, GenericRoute } from "../api";
 import "leaflet/dist/leaflet.css";
+import "maplibre-gl/dist/maplibre-gl.css";
+import "@maplibre/maplibre-gl-leaflet";
+import { setWorkerUrl } from "maplibre-gl";
+// Vite's worker pipeline bundles the worker script's own dependency graph
+// (notably maplibre-gl-shared.mjs, which the raw file imports via a plain
+// relative specifier that bundlers otherwise wouldn't rewrite) into one
+// self-contained, hashed asset and hands back its URL.
+import workerUrl from "maplibre-gl/dist/maplibre-gl-worker.mjs?worker&url";
+
+setWorkerUrl(workerUrl);
+
+const OPENFREEMAP_STYLE_URL = "https://tiles.openfreemap.org/styles/positron";
+
+// OpenFreeMap's recommended credit line, as clickable links. The MapLibre
+// adapter always disables MapLibre GL's own on-canvas attribution control
+// (see @maplibre/maplibre-gl-leaflet's _initGL), so this text surfaces only
+// through Leaflet's own attribution control -- one attribution surface, not two.
+const OPENFREEMAP_ATTRIBUTION =
+  '&copy; <a href="https://openfreemap.org" target="_blank" rel="noopener">OpenFreeMap</a> ' +
+  '&copy; <a href="https://www.openmaptiles.org/" target="_blank" rel="noopener">OpenMapTiles</a> ' +
+  'Data from <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener">OpenStreetMap</a>';
 
 const ROUTE_COLORS = {
   casing: "#f4f1ea",
@@ -94,6 +114,25 @@ function LocationMarker({ position, onSelect }: LocationMarkerProps) {
   return position ? <Marker position={position} icon={startIcon} /> : null;
 }
 
+/** OpenFreeMap Positron vector basemap, mounted via the MapLibre-Leaflet adapter. */
+function OpenFreeMapBasemap() {
+  const map = useMap();
+
+  useEffect(() => {
+    const layer = L.maplibreGL({
+      style: OPENFREEMAP_STYLE_URL,
+      attributionControl: { customAttribution: OPENFREEMAP_ATTRIBUTION },
+    });
+    layer.addTo(map);
+
+    return () => {
+      map.removeLayer(layer);
+    };
+  }, [map]);
+
+  return null;
+}
+
 /** Pan/zoom to fit the current routes whenever they change. */
 function FitToRoutes({ routes }: { routes: GenericRoute[] | null }) {
   const map = useMap();
@@ -168,12 +207,7 @@ export default function Map({
         zoom={13}
         className="h-full w-full"
       >
-        <TileLayer
-          url="https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png"
-          subdomains="abcd"
-          maxZoom={20}
-          attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors &copy; <a href="https://carto.com/attributions">CARTO</a>'
-        />
+        <OpenFreeMapBasemap />
 
         <LocationMarker position={position} onSelect={onSelect} />
         <FitToRoutes routes={routes} />
