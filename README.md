@@ -24,7 +24,7 @@ Runners planning a longer route usually cross-reference a map, a facility locato
 
 **Cumulative-mile facility constraints.** The harder problem: "a restroom between mile 2 and 4" only counts if it's encountered on the *finished route*, inside that window, measured by cumulative distance — not proximity to the start. Each facility is projected onto the route's geometry and grouped into distinct encounters, so a facility passed twice on an out-and-back is two real chances, not one. A min-cost bipartite matching then deterministically assigns encounters to requirements. A route is only "fully valid" if every requirement is satisfied this way — partial matches are always labeled honestly, never silently upgraded.
 
-**Ranking and diversity.** Most requests are solved by an ordinary candidate pool, scored against the constraints first, since that's far cheaper than search. When that's not enough, a bounded beam search proposes candidates that route through the required facilities directly. The final alternatives are deduplicated by route-segment overlap so the ranked list isn't three near-identical loops.
+**Ranking and diversity.** The planner scores an ordinary candidate pool against the constraints first, since that's far cheaper than constrained search. When that's not enough, a bounded beam search proposes candidates that route through the required facilities directly. The final alternatives are deduplicated by route-segment overlap so the ranked list isn't three near-identical loops.
 
 ## Architecture
 
@@ -50,7 +50,7 @@ The backend ships with deterministic benchmark suites, re-run against the curren
 
 | Metric | Result |
 |---|---|
-| Routes within ±100 m of target | 537/537 |
+| Scenarios with ≥1 route within ±100 m | 537/537 |
 | Disconnected candidates | 0 |
 | Median / p95 generation latency | 0.345 s / 1.805 s |
 | Scenarios with a meaningfully distinct alternative | 100% |
@@ -71,7 +71,7 @@ A separate stress suite places facilities specifically to force the constrained 
 
 **Backend:** Python, FastAPI, OSMnx, NetworkX, Supabase, pytest, Ruff, mypy (strict)
 
-**Frontend:** React 19, TypeScript, Vite, Leaflet / react-leaflet, MapLibre GL (via OpenFreeMap), Tailwind CSS
+**Frontend:** React 19, TypeScript, Vite, Leaflet / react-leaflet, MapLibre GL, OpenFreeMap, Tailwind CSS
 
 **Infrastructure:** Vercel (frontend), Render (backend), GitHub Actions CI
 
