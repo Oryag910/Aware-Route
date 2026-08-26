@@ -27,6 +27,9 @@ node_modules/
 *.tsbuildinfo
 coverage/
 
+# Copied at build/dev time from node_modules/maplibre-gl -- see vite.config.ts
+frontend/public/vendor/
+
 # Logs and runtime files
 *.log
 *.pid

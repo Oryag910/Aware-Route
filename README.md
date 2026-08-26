@@ -175,5 +175,5 @@ GitHub Actions runs on every PR and push to `main`:
 
 - Routing and facility data is derived from OpenStreetMap — © OpenStreetMap contributors.
 - OSM-derived data (the committed walk graph, `fountains.json`, `interruptions.json`) is governed by the Open Data Commons Open Database License (ODbL), separately from this repo's source-code license — see [`DATA_LICENSE.md`](DATA_LICENSE.md).
-- The map's basemap tiles are provided by CARTO.
+- The map's basemap is [OpenFreeMap](https://openfreemap.org)'s Positron vector style, rendered via MapLibre GL JS.
 - Full attribution details: [`ATTRIBUTION.md`](ATTRIBUTION.md).
