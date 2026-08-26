@@ -170,3 +170,10 @@ GitHub Actions runs on every PR and push to `main`:
 - Requests with several simultaneous facility requirements are honest best-effort, and — measured, not hand-waved — meaningfully weaker than a single hard requirement: the Stratum B planner-stress benchmark shows the constrained planners recover a single genuinely-hard (non-naturally-satisfiable) requirement 100% of the time, but 0% of the time with 2 or more simultaneously, because the scorer correctly refuses to sacrifice distance accuracy for partial facility credit (see `backend/benchmarks/facilities/` for the full breakdown and a verified explanation, not a guess). A route with unmet requirements is always returned as `constraints_satisfied=false`, never silently upgraded. Improving multi-hard-requirement recovery would need real planner/search work (larger budgets, smarter joint placement), not just tuning constants.
 - No live turn-by-turn navigation or run tracking.
 - The benchmark validates graph-network routing correctness and offline fountain placement; it does not independently verify every crossing, ferry, or water-adjacency condition beyond what the committed walk graph encodes.
+
+## Data & attribution
+
+- Routing and facility data is derived from OpenStreetMap — © OpenStreetMap contributors.
+- OSM-derived data (the committed walk graph, `fountains.json`, `interruptions.json`) is governed by the Open Data Commons Open Database License (ODbL), separately from this repo's source-code license — see [`DATA_LICENSE.md`](DATA_LICENSE.md).
+- The map's basemap tiles are provided by CARTO.
+- Full attribution details: [`ATTRIBUTION.md`](ATTRIBUTION.md).
