@@ -14,14 +14,13 @@ import "leaflet/dist/leaflet.css";
 import "maplibre-gl/dist/maplibre-gl.css";
 import "@maplibre/maplibre-gl-leaflet";
 import { setWorkerUrl } from "maplibre-gl";
+// Vite's worker pipeline bundles the worker script's own dependency graph
+// (notably maplibre-gl-shared.mjs, which the raw file imports via a plain
+// relative specifier that bundlers otherwise wouldn't rewrite) into one
+// self-contained, hashed asset and hands back its URL.
+import workerUrl from "maplibre-gl/dist/maplibre-gl-worker.mjs?worker&url";
 
-// MapLibre GL resolves its worker script relative to its own module URL at
-// runtime, which breaks once a bundler inlines everything into one chunk
-// (the worker file never ends up alongside it, and its own relative import
-// of maplibre-gl-shared.mjs would break even if it did). vite.config.ts
-// copies both files from node_modules/maplibre-gl/dist verbatim so this
-// static path always has a matching pair to resolve against.
-setWorkerUrl("/vendor/maplibre-gl/maplibre-gl-worker.mjs");
+setWorkerUrl(workerUrl);
 
 const OPENFREEMAP_STYLE_URL = "https://tiles.openfreemap.org/styles/positron";
 
