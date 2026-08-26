@@ -3,7 +3,7 @@ from typing import Any, Literal, cast
 
 from app.amenities.snapping import SnappedAmenity
 from app.generation.amenity_first import through_amenities_pairs
-from app.generation.length_tune import tune_generator_pairs_to_target
+from app.generation.length_tune import DEFAULT_TOLERANCE_M, tune_generator_pairs_to_target
 from app.generation.out_and_back import out_and_back_pairs
 from app.generation.polygon_amenity import polygon_loop_through_amenities_pairs
 from app.generation.polygon_loop import polygon_loop_pairs
@@ -65,7 +65,7 @@ def _tuned_pairs(
         if shape == "round":
             return round_pairs(
                 graph, start_node, dists, target_distance_m, count, radius_scale,
-                paths,
+                paths, tolerance_m=DEFAULT_TOLERANCE_M,
             )
         return out_and_back_pairs(
             graph, start_node, dists, target_distance_m, count, radius_scale,
@@ -103,6 +103,7 @@ def generate_routes(
     snapped: list[SnappedAmenity] | None = None,
     min_range_m: float | None = None,
     max_range_m: float | None = None,
+    result_count: int | None = None,
 ) -> list[GeneratedRoute]:
     """Generate length-tuned `GeneratedRoute`s (candidate + node_path +
     quality metrics) of the requested shape.
@@ -114,6 +115,18 @@ def generate_routes(
     `generate_amenity_aware`. "round"/"mix" pools are ranked roundest
     first by isoperimetric quotient; "out_and_back" is ranked by the
     turnaround-bearing diversity already applied in `out_and_back_pairs`.
+
+    `count` is both "how many to construct per shape" and (when
+    `result_count` is omitted) "how many to keep". Callers that want an
+    overcomplete candidate pool for their OWN downstream selection (e.g.
+    `app.facilities.orchestration`'s shape-balanced mix portfolio) pass a
+    larger `result_count`: for "mix" this skips the roundest-first
+    truncation (which would otherwise silently drop every out_and_back
+    candidate -- round loops structurally score much higher on
+    isoperimetric quotient than a there-and-back line, so ranking the
+    combined pool by quotient before a caller can apply its own shape
+    quota starves that quota of out_and_back candidates regardless of
+    how large the pool is) and instead keeps the wider deduped union.
     """
     start_node = nearest_node(graph, start)
     # One Dijkstra from the start yields both distances and every outbound
@@ -124,6 +137,7 @@ def generate_routes(
     amenity_aware = (
         snapped is not None and min_range_m is not None and max_range_m is not None
     )
+    final_count = count if result_count is None else result_count
 
     if shape == "round" and _round_generator_version() == "polygon":
         pool = _to_routes(
@@ -157,15 +171,36 @@ def generate_routes(
             ),
             "out_and_back",
         )
-        combined = _dedup_routes(round_pool + out_back_pool)
-        combined.sort(
-            key=lambda route: route.quality.isoperimetric_quotient,
-            reverse=True,
-        )
-        pool = combined[:count]
+        if result_count is None:
+            # Ordinary ranked-and-truncated behaviour: nobody downstream
+            # is doing shape-balanced portfolio selection, so pick the
+            # single best-by-roundness `count`.
+            combined = _dedup_routes(round_pool + out_back_pool)
+            combined.sort(
+                key=lambda route: route.quality.isoperimetric_quotient,
+                reverse=True,
+            )
+        else:
+            # A caller doing its own shape-balanced portfolio selection
+            # (e.g. orchestration's mix quota) needs BOTH shapes
+            # represented in the truncated pool it gets back. Simply
+            # concatenating round_pool + out_back_pool and truncating
+            # would silently drop every out_and_back candidate whenever
+            # round_pool alone already fills `final_count` (round routes
+            # are also far more likely to survive tuning on a dense
+            # Manhattan grid) -- interleaving round-robin guarantees both
+            # shapes get a fair share of the truncated slots.
+            interleaved = [
+                route
+                for pair in zip(round_pool, out_back_pool, strict=False)
+                for route in pair
+            ]
+            leftover = round_pool[len(out_back_pool):] + out_back_pool[len(round_pool):]
+            combined = _dedup_routes(interleaved + leftover)
+        pool = combined[:final_count]
 
     if not amenity_aware:
-        return pool[:count]
+        return pool[:final_count]
 
     assert snapped is not None and min_range_m is not None and max_range_m is not None
     amenity_triples: list[tuple[RouteCandidate, list[int], Shape]]

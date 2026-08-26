@@ -404,3 +404,83 @@ def test_route_request_schema_excludes_elevation_and_workout() -> None:
     route_request_schema = schema["components"]["schemas"]["RouteRequest"]["properties"]
     assert "elevation_preference" not in route_request_schema
     assert "workout_type" not in route_request_schema
+
+
+# Regression coverage for the no-facility route-count bug: sector
+# starvation in app.generation.turnarounds.select_turnarounds used to cap
+# the whole no-facility pipeline at 1-2 candidates on ordinary Manhattan
+# requests, even though the product/UI always asks for (and advertises)
+# up to 3. Central Park at a moderate distance has plenty of genuine
+# turnaround alternatives on the real committed graph, so these are
+# reliability regressions, not synthetic best-cases.
+_CENTRAL_PARK = {"start_lat": 40.7812, "start_lon": -73.9665}
+MILES_TO_METERS = 1609.34
+
+
+@pytest.mark.parametrize("shape", ["round", "out_and_back", "mix"])
+def test_no_facilities_returns_full_requested_count(shape: str) -> None:
+    response = client.post(
+        "/routes",
+        json={
+            **_CENTRAL_PARK,
+            "target_distance_m": 3.0 * MILES_TO_METERS,
+            "facility_requirements": [],
+            "shape": shape,
+            "count": 3,
+        },
+    )
+    assert response.status_code == 200, response.text
+    assert len(response.json()) == 3
+
+
+def test_no_facilities_mix_includes_both_shapes_when_count_allows() -> None:
+    """The engine's mix pool used to rank its combined round/out_and_back
+    candidates by roundness before an overcomplete pool ever reached
+    final selection -- round loops structurally score higher on
+    isoperimetric quotient than a there-and-back line, so that ranking
+    silently dropped every out_and_back candidate regardless of pool
+    size. This asserts the fix: a real mix request with enough graph
+    alternatives returns both shapes, matching the product's mix-shape
+    portfolio intent."""
+    response = client.post(
+        "/routes",
+        json={
+            **_CENTRAL_PARK,
+            "target_distance_m": 3.0 * MILES_TO_METERS,
+            "facility_requirements": [],
+            "shape": "mix",
+            "count": 3,
+        },
+    )
+    assert response.status_code == 200, response.text
+    shapes = {route["shape"] for route in response.json()}
+    assert shapes == {"round", "out_and_back"}
+
+
+@pytest.mark.parametrize("shape", ["round", "out_and_back", "mix"])
+@pytest.mark.parametrize("miles", [3.0, 8.0])
+def test_no_facilities_all_routes_within_tolerance(shape: str, miles: float) -> None:
+    """Exact-count fulfillment alone is too weak a regression check: the
+    count-reliability benchmark showed round-shape requests reliably
+    returning 3 routes while one of them missed +/-100m (a batch-level
+    `radius_scale` picked to fit the closest candidate left OTHER
+    turnarounds' independently-varying reuse-penalized return legs
+    overshooting -- see app.generation.round_route._correct_overshoot).
+    For an ordinary Manhattan request with plenty of graph alternatives
+    (Central Park, 3/8mi), the product should not settle for "count
+    satisfied, quality not" -- every returned route must be within
+    tolerance, not just at least one."""
+    response = client.post(
+        "/routes",
+        json={
+            **_CENTRAL_PARK,
+            "target_distance_m": miles * MILES_TO_METERS,
+            "facility_requirements": [],
+            "shape": shape,
+            "count": 3,
+        },
+    )
+    assert response.status_code == 200, response.text
+    routes = response.json()
+    assert len(routes) == 3
+    assert all(route["distance_constraint_satisfied"] for route in routes), routes
