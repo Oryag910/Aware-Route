@@ -24,6 +24,7 @@ See `frontend/src/components/Map.tsx` for the tile layer configuration.
 ## Elevation (SRTM)
 
 The committed walk graph's node elevations are sourced from NASA's Shuttle
-Radar Topography Mission (SRTM), fetched via the `srtm` Python package. SRTM
-is a U.S. government work product with no usage restrictions. See
+Radar Topography Mission (SRTM), fetched via the `srtm` Python package.
+NASA SRTM data is publicly available for reuse; no separate repository
+license is applied to the elevation values here. See
 [`DATA_LICENSE.md`](DATA_LICENSE.md) for details.

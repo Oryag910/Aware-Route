@@ -2,9 +2,10 @@
 
 Committed data assets used by the backend at runtime. See
 [`../../DATA_LICENSE.md`](../../DATA_LICENSE.md) and
-[`../../ATTRIBUTION.md`](../../ATTRIBUTION.md) — these files contain
-OpenStreetMap-derived data and are **not** covered by the repository's
-MIT source-code license.
+[`../../ATTRIBUTION.md`](../../ATTRIBUTION.md) — the OpenStreetMap-derived
+files below (`manhattan_walk_graph.v1.pkl`, `fountains.json`,
+`interruptions.json`) are **not** covered by the repository's MIT
+source-code license.
 
 ## `manhattan_walk_graph.v1.pkl` / `manhattan_walk_graph.v1.manifest.json`
 
@@ -13,6 +14,13 @@ pickled `networkx.MultiDiGraph` built from OpenStreetMap data via
 [OSMnx](https://osmnx.readthedocs.io/), with best-effort SRTM node
 elevations attached. Built once offline and committed so the app loads it
 at startup instead of fetching/building a graph per request/deploy.
+
+The `.pkl` file contains the OSM-derived graph itself (see
+[`DATA_LICENSE.md`](../../DATA_LICENSE.md)); the accompanying
+`.manifest.json` is locally generated artifact metadata (version, node/edge
+counts, SHA-256, build-environment library versions, source area, whether
+elevation is present) used to validate the pickle on load — it is not
+itself OSM-derived data and is not separately ODbL-licensed.
 
 Regenerate with `backend/scripts/build_graph.py`. Full format/versioning
 details: [`docs/graph-packaging.md`](../../docs/graph-packaging.md).

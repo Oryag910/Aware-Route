@@ -1,10 +1,9 @@
 # Data license
 
-The following committed data assets are **not** covered by this repository's
-source-code license (see [`LICENSE`](LICENSE)):
+The following three committed data assets are **not** covered by this
+repository's source-code license (see [`LICENSE`](LICENSE)):
 
 - `backend/data/manhattan_walk_graph.v1.pkl`
-- `backend/data/manhattan_walk_graph.v1.manifest.json`
 - `backend/data/fountains.json`
 - `backend/data/interruptions.json`
 
@@ -54,7 +53,6 @@ ODbL text at the link above for the actual terms.
 `manhattan_walk_graph.v1.pkl` also carries a best-effort `elevation`
 attribute on each node, sourced from NASA's Shuttle Radar Topography
 Mission (SRTM) via the `srtm` Python package (see `attach_elevations()` in
-`backend/scripts/build_graph.py`). SRTM data is a U.S. government work
-product and is provided by NASA without usage restrictions, so no separate
-license/attribution obligation applies to it beyond the OSM terms above,
-which govern the rest of the graph.
+`backend/scripts/build_graph.py`). NASA SRTM data is publicly available for
+reuse; no separate repository license is applied to the elevation values
+here, beyond the OSM terms above, which govern the rest of the graph.
