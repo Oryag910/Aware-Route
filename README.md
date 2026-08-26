@@ -67,6 +67,12 @@ Full report: [`backend/benchmarks/local/report_20260825_185757.md`](backend/benc
 
 A separate stress suite places facilities specifically to force the constrained planner rather than any natural route. It shows the honest limit: a single hard requirement is recovered 18/18 times, but 2 or more simultaneous hard requirements are not reliably solved today — see [Limitations](#limitations). Full report: [`backend/benchmarks/facilities/report_20260825_184658.md`](backend/benchmarks/facilities/report_20260825_184658.md)
 
+## Technical docs
+
+- [Architecture](docs/architecture.md) — how a request becomes a ranked set of routes
+- [Benchmarks](docs/benchmarks.md) — methodology behind the numbers above
+- [Deployment](docs/deployment.md) — production and PR-preview infrastructure
+
 ## Tech stack
 
 **Backend:** Python, FastAPI, OSMnx, NetworkX, Supabase, pytest, Ruff, mypy (strict)

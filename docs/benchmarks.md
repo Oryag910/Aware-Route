@@ -1,0 +1,83 @@
+# Benchmarks
+
+How the correctness and performance claims in this repository are measured, and — just as importantly — what they don't claim.
+
+## Why benchmark this project
+
+"Route generation succeeded" isn't a single pass/fail bit. A route can come back and still be wrong along several independent dimensions: is it close enough to the requested distance, is the graph traversal actually connected, did the API return the number of alternatives it was asked for, are those alternatives meaningfully different from each other, and — for facility requests — was the requested stop actually encountered where it was supposed to be, not just present somewhere nearby? The suites below each target one of those dimensions with a deterministic, reproducible scenario set, rather than a single aggregate score.
+
+## Core local-engine suite
+
+Source: [`backend/benchmarks/local/report_20260825_185757.md`](../backend/benchmarks/local/report_20260825_185757.md) — 537 scenarios (round / out-and-back / mixed shapes, no facility requirements).
+
+| Metric | Result |
+|---|---|
+| Scenarios with ≥1 route within ±100 m of target | 537/537 |
+| Disconnected candidates | 0 |
+| Candidates inspected | 2,680 |
+| Median / p95 / max generation latency | 0.345 s / 1.805 s / 3.067 s |
+| Offline fountain-placement checks | 268/268 |
+| Scenarios with ≥1 meaningfully distinct alternative | 100% |
+| All candidate pairs at/below 0.80 overlap | 93.8% (5,022/5,352 pairs) |
+| Pooled median pairwise segment overlap | 0.040 |
+
+**Reading these numbers:** "537/537" is scenario-level success — every scenario produced at least one qualifying route, not "537 routes were generated" (2,680 candidates were actually inspected across those scenarios). Distance success is measured against a ±100 m tolerance on the requested distance.
+
+**Diversity metric:** each route is represented as the set of undirected consecutive segments in its rendered geometry (endpoints rounded to six decimal places); overlap between two routes is the Jaccard index over those segment sets. A pair at or below 0.80 overlap counts as "meaningfully distinct." Out-and-back routes structurally retrace most of their own outbound path by definition, so high self-overlap there is expected and isn't comparable to round/mixed routes.
+
+The report also carries a set of purely descriptive geometry metrics (max start distance, isoperimetric quotient, elongation ratio, sharp turns per km) captured as a baseline ahead of round-generator changes — those are observability, not a pass/fail gate.
+
+## Route-count reliability
+
+Source: [`backend/benchmarks/local/count_reliability_20260825_183354.md`](../backend/benchmarks/local/count_reliability_20260825_183354.md)
+
+The core suite above only ever asserted "≥1 valid route" — it never checked that the *returned count* matched the *requested count*, which is exactly the kind of gap a route-count regression can hide in. This suite closes it, re-running the same 537 scenarios through the real product code path at the live default of 3 requested alternatives:
+
+| Metric (requested count = 3) | Result |
+|---|---|
+| Scenarios returning exactly the requested count | 100.0% |
+| Scenarios where all returned routes were within ±100 m | 99.8% |
+| Both of the above simultaneously | 99.8% |
+| Individual candidates within ±100 m | 99.9% |
+
+As a secondary stress figure, requesting 5 alternatives instead of the default 3 across the same scenarios drops slightly to 98.9% exact-count / 99.4% all-within-tolerance / 98.7% both — expected, since a wider pool has to stretch further for diverse candidates, but not representative of the live product default.
+
+## Facility constraint benchmark
+
+Source: [`backend/benchmarks/facilities/report_20260825_184658.md`](../backend/benchmarks/facilities/report_20260825_184658.md) — three strata, each testing a different question about cumulative-mile facility constraints.
+
+**Stratum A — mechanism correctness.** Fixtures are placed at the exact point a real reference route's own geometry already passes at the target mile marker, so satisfaction is achievable by construction. 117 scenarios across 0 to 6 simultaneous requirements: **117/117 fully constraint-valid**. This proves the encounter-matching and deterministic-assignment mechanism correctly recognizes an achievable cumulative-mile stop — it does not prove that arbitrary real-world facility placement is always jointly routable, since these fixtures are natural-match-friendly by construction.
+
+**Stratum B — planner stress.** Fixtures are placed at real graph nodes near the requested window's radial (straight shortest-path-from-start) distance instead of on any candidate's own geometry, and explicitly rejected and re-picked if an ordinary natural-match pool already happens to cover them. This is the number that actually measures whether the constrained planners are doing real work:
+
+| Simultaneous hard requirements | Fully constraint-valid |
+|---|---|
+| 1 | 18/18 (100%) |
+| 2 | 0/18 (0%) |
+| 3-4 | 0/18 (0%) |
+| 5-6 | 0/18 (0%) |
+
+A single genuinely-hard requirement is recovered every time. Two or more simultaneous hard requirements are not currently solved by the bounded beam search — this is a measured search-space limitation, not a hidden one; see [`architecture.md`](architecture.md#known-technical-boundary). (The 5-6 row's "fully constraint-valid" count of 0/18 is a scenario-level all-or-nothing figure; the report separately tracks individual per-requirement satisfaction across the same 18 scenarios, which is a different, non-zero measurement — the two aren't in conflict, they answer different questions.)
+
+**Stratum C — real committed water-dataset coverage.** No synthetic fixture placement at all — the actual bundled OSM water extract, exercised exactly as a live request would. 12/12 scenarios fully constraint-valid, 18/18 individual water requirements found, median latency 6.75 s (max 10.23 s). This is a small, deliberately narrow sample (2 starting areas × 3 distances × 1-2 requirements) — a coverage measurement for that specific sample, not a claim about water-facility coverage everywhere in Manhattan. Restroom data is Supabase-only and isn't represented in any offline benchmark.
+
+## How to read the numbers
+
+| Claim | Means | Does not mean |
+|---|---|---|
+| 537/537 (core suite) | Every scenario had at least one qualifying route | Every generated candidate was flawless |
+| 117/117 (Stratum A) | The matching/assignment mechanism correctly recognizes an achievable facility constraint | Arbitrary real facility combinations are always jointly routable |
+| 18/18 → 0/18 (Stratum B) | A single hard requirement is reliably recovered; 2+ simultaneous ones aren't today | The planner never finds partial solutions to harder requests |
+| 12/12 (Stratum C) | That specific narrow water-data sample passed | All water windows everywhere in Manhattan are covered |
+
+## Reproducing benchmarks
+
+All three suites are deterministic Python scripts, run without arguments from `backend/`:
+
+```bash
+python scripts/benchmark_suite.py          # core local-engine suite
+python scripts/benchmark_count_reliability.py
+python scripts/benchmark_facilities.py
+```
+
+For interpretable timing figures, run a suite alone rather than alongside other CPU-heavy processes — these are wall-clock latency measurements, and unrelated load on the same machine will inflate them.
