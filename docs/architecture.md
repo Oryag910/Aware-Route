@@ -57,7 +57,7 @@ A shortest path answers "how do I get from A to B," not "give me a 5-mile loop."
 - A **mixed** request pools both round and out-and-back candidates together.
 - A newer multi-anchor polygon-loop generator produces geometrically cleaner round routes, but isn't the default for ordinary requests — enabling it pushes p95 latency past this project's own production latency gate. It's used today specifically inside the constrained facility planners (below), where routing through required stops matters more than shaving latency on the common case.
 
-Final quality scoring is a simple tie-breaker over candidates that already meet the hard constraints: less edge reuse and a higher share of pedestrian-ways is preferred (out-and-back routes are exempted from the edge-reuse term, since retracing the outbound leg is that shape's defining feature, not a defect).
+The generic scorer uses route quality only as its final soft ranking term, after hard-constraint status and distance error. That quality term favors less edge reuse and a higher pedestrian-way share; out-and-back routes are exempted from the reuse penalty because retracing is inherent to that shape.
 
 ## Facility constraints
 
@@ -73,7 +73,7 @@ This is the harder problem: "a restroom between mile 2 and 4" only counts if it'
 
 ## Ranking and diversity
 
-Among valid candidates, alternatives are deduplicated by route-segment overlap (a Jaccard index over each route's set of undirected geometry segments) so the returned list isn't three near-identical loops. A pair below the overlap threshold counts as meaningfully distinct; selection greedily keeps the diverse ones over the ranked list, falling back to rank order when a fully diverse set isn't available. Out-and-back routes structurally retrace their own outbound leg by definition, so high self-overlap there is expected, not a defect.
+After constraint-first ranking, final selection prefers alternatives whose undirected rendered-segment overlap with every already-selected route is at or below 0.80 Jaccard overlap. If that diversity preference cannot fill the requested count, the selector backfills candidates in original rank order rather than returning fewer routes. Out-and-back retracing is expected and is handled separately in route-quality scoring.
 
 ## Important design decisions
 

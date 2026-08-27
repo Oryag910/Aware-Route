@@ -31,7 +31,7 @@ The report also carries a set of purely descriptive geometry metrics (max start 
 
 Source: [`backend/benchmarks/local/count_reliability_20260825_183354.md`](../backend/benchmarks/local/count_reliability_20260825_183354.md)
 
-The core suite above only ever asserted "≥1 valid route" — it never checked that the *returned count* matched the *requested count*, which is exactly the kind of gap a route-count regression can hide in. This suite closes it, re-running the same 537 scenarios through the real product code path at the live default of 3 requested alternatives:
+With respect to result count, the core suite only required at least one qualifying route per scenario; it did not assert that the number returned matched the number requested — exactly the kind of gap a route-count regression can hide in. This suite closes that specific blind spot, re-running the same 537 scenarios through the real product code path at the live default of 3 requested alternatives:
 
 | Metric (requested count = 3) | Result |
 |---|---|
