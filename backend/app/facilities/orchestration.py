@@ -36,7 +36,16 @@ from app.generation.routes import GeneratedRoute
 from app.routing.provider import Coordinate
 
 
-logger = logging.getLogger(__name__)
+# The app configures no explicit logging (no `logging.basicConfig`, no
+# uvicorn `--log-config`), so a plain `logging.getLogger(__name__)`
+# logger has no handler and an effective level of WARNING inherited
+# from the unconfigured root logger -- `.info()` calls on it are
+# silently dropped, never reaching stdout/Render's log capture.
+# Uvicorn DOES configure "uvicorn.error" (and "uvicorn.access") with a
+# stdout handler at INFO level on startup, so route_plan timing reuses
+# that already-configured logger rather than adding any new logging
+# setup of our own.
+logger = logging.getLogger("uvicorn.error")
 
 Shape = Literal["round", "out_and_back", "mix"]
 

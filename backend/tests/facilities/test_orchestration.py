@@ -1,3 +1,4 @@
+import logging
 import time
 from typing import Any
 from unittest.mock import patch
@@ -460,3 +461,31 @@ def test_deadline_starts_before_natural_generation(monkeypatch: pytest.MonkeyPat
     # constrained planner runs -- it must see well under the full budget,
     # not a fresh 0.2s of its own.
     assert captured["remaining"] < 0.1
+
+
+def test_route_plan_timing_log_is_actually_emitted(caplog: pytest.LogCaptureFixture) -> None:
+    """Regression guard for the "route_plan timing" line never reaching
+    Render's application logs: the app configures no explicit logging,
+    so a plain `logging.getLogger(__name__)` logger has no effective
+    handler and silently drops `.info()` calls. `plan_routes` must log
+    through "uvicorn.error" (already configured with a stdout handler
+    by uvicorn at runtime) instead."""
+    with (
+        patch(
+            "app.facilities.orchestration.natural_match_pool",
+            return_value=[_route("round", 0.0, 8000.0)],
+        ),
+        caplog.at_level(logging.INFO, logger="uvicorn.error"),
+    ):
+        plan_routes(
+            graph=object(),
+            start=Coordinate(lat=40.0, lon=-73.0),
+            target_distance_m=8000.0,
+            shape="round",
+            count=3,
+            requirements=[],
+            facilities=[],
+        )
+
+    timing_records = [r for r in caplog.records if r.name == "uvicorn.error"]
+    assert any("route_plan timing" in r.getMessage() for r in timing_records)
