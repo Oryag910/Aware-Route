@@ -4,7 +4,7 @@ A Manhattan running-route planner that treats restroom and water stops as hard r
 
 **[Live demo →](https://aware-route-ashen.vercel.app)**
 
-![Aware Route showing three ranked route alternatives with a matched restroom stop in Central Park](docs/assets/aware-route-demo.png)
+![Aware Route showing three ranked route alternatives with a matched restroom stop](docs/assets/aware-route-demo.png)
 
 Runners planning a longer route usually cross-reference a map, a facility locator, and a distance estimate by hand. Aware Route folds all three into one request — "5 miles, a restroom around mile 2-4, water around mile 6-8" — and returns several ranked routes that are actually built around those stops, not just filtered for them afterward.
 
