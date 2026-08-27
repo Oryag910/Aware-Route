@@ -35,6 +35,7 @@ the PR #18 spec. Never imports/modifies `app/generation/amenity_first.py`
 from typing import Any, Literal
 
 from app.facilities.models import Facility, FacilityRequirement, SnappedFacility
+from app.facilities.planning_deadline import PlanningDeadline
 from app.facilities.snapping import snap_facilities
 from app.generation.reuse_penalty import edge_pairs, reuse_penalized_path
 from app.generation.routes import GeneratedRoute, compute_quality
@@ -104,6 +105,25 @@ TURNAROUND_ANGULAR_TOLERANCE_DEG = 90.0
 # everything itself, so returning somewhat more than `count` candidates
 # is fine/expected.
 RESULT_CEILING = 8
+
+
+def _adaptive_build_budget(requirement_count: int) -> int:
+    """How many of `MAX_FULL_BUILDS_PER_CALL`'s expensive real-graph
+    builds this call gets, based on requirement count.
+
+    Mirrors `round_planner._adaptive_build_budget`'s rationale: the Aug
+    25 facility stress benchmark shows a single genuinely-hard
+    requirement is reliably solved at the full budget, while 2+
+    simultaneous hard requirements already succeed in only 0-2.8% of
+    stress cases even at full budget -- so the full budget is preserved
+    where it's proven to matter and shrunk where extra builds mostly
+    just add latency.
+    """
+    if requirement_count <= 1:
+        return MAX_FULL_BUILDS_PER_CALL
+    if requirement_count == 2:
+        return 5
+    return 3
 
 
 def _angular_distance(a: float, b: float) -> float:
@@ -258,6 +278,7 @@ def plan_constrained_out_and_back(
     count: int,
     requirements: list[FacilityRequirement],
     facilities: list[Facility],
+    deadline: PlanningDeadline | None = None,
 ) -> list[GeneratedRoute]:
     """Constrained out-and-back planner: threads a variable-length list of
     typed facility requirements onto an out-and-back's outbound corridor.
@@ -266,11 +287,19 @@ def plan_constrained_out_and_back(
     there are no requirements to place (a no-facility request must never
     invoke this planner's search machinery). See module docstring for the
     bounded-search algorithm.
-    """
+
+    `deadline` is a cooperative, shared-across-planners wall-clock
+    budget (see `app/facilities/planning_deadline.py`) checked before
+    each expensive real graph build; if unset, a fresh default-budget
+    deadline is used so this planner remains safely callable on its own
+    (e.g. from tests)."""
     if shape not in ("out_and_back", "mix"):
         return []
     if not requirements:
         return []
+
+    if deadline is None:
+        deadline = PlanningDeadline()
 
     snapped = snap_facilities(graph, facilities)
     if not snapped:
@@ -298,9 +327,10 @@ def plan_constrained_out_and_back(
     results: list[GeneratedRoute] = []
     seen_geometries: set[tuple[tuple[float, float], ...]] = set()
     full_builds_attempted = 0
+    build_budget = _adaptive_build_budget(len(requirements))
 
     for corridor_node, _corridor_dist in corridor_turnarounds:
-        if full_builds_attempted >= MAX_FULL_BUILDS_PER_CALL:
+        if full_builds_attempted >= build_budget or deadline.expired():
             break
 
         corridor_bearing = bearing_deg(start_coord, node_coordinate(graph, corridor_node))
@@ -313,7 +343,7 @@ def plan_constrained_out_and_back(
             continue
 
         for _cost, waypoint_nodes in beam_plans[:PLANS_PER_CORRIDOR]:
-            if full_builds_attempted >= MAX_FULL_BUILDS_PER_CALL:
+            if full_builds_attempted >= build_budget or deadline.expired():
                 break
             full_builds_attempted += 1
 

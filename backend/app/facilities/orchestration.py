@@ -16,12 +16,15 @@ into the same pool before scoring, so one scorer/ranker stays
 authoritative for both natural and constrained candidates.
 """
 
+import logging
+import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any, Literal
 
 from app.facilities.diversity import select_diverse
 from app.facilities.models import Facility, FacilityRequirement
+from app.facilities.planning_deadline import PlanningDeadline
 from app.facilities.scoring import (
     FacilityScore,
     is_fully_valid,
@@ -32,6 +35,8 @@ from app.generation.engine import generate_routes
 from app.generation.routes import GeneratedRoute
 from app.routing.provider import Coordinate
 
+
+logger = logging.getLogger(__name__)
 
 Shape = Literal["round", "out_and_back", "mix"]
 
@@ -253,13 +258,18 @@ def _select_mix_portfolio(scored: list[ScoredRoute], count: int) -> list[ScoredR
 
 
 # Signature for a constrained-planner hook: given the same inputs
-# `plan_routes` receives, return extra `GeneratedRoute` candidates to
-# fold into the same pool before scoring. Phase 3/4/5 register planners
-# here instead of forking the orchestration flow.
+# `plan_routes` receives plus the shared `PlanningDeadline` for this
+# request, return extra `GeneratedRoute` candidates to fold into the same
+# pool before scoring. Phase 3/4/5 register planners here instead of
+# forking the orchestration flow.
 ConstrainedPlanner = Callable[
-    [Any, Coordinate, float, Shape, int, list[FacilityRequirement], list[Facility]],
+    [Any, Coordinate, float, Shape, int, list[FacilityRequirement], list[Facility], PlanningDeadline],
     list[GeneratedRoute],
 ]
+
+
+def _geometry_key(route: GeneratedRoute) -> tuple[tuple[float, float], ...]:
+    return tuple((p.lat, p.lon) for p in route.candidate.geometry)
 
 
 def plan_routes(
@@ -273,37 +283,91 @@ def plan_routes(
     *,
     constrained_planners: list[ConstrainedPlanner] | None = None,
 ) -> list[ScoredRoute]:
-    """Natural-match-first planning. When `constrained_planners` are
-    given and natural matching doesn't yield `count` fully valid
-    candidates, each planner's extra candidates are folded into the
-    same pool before final scoring -- hard-constraint quality from
-    either source always outranks a prettier natural match (see
-    `rank_key`)."""
-    pool = natural_match_pool(graph, start, target_distance_m, shape, count, requirements)
-    scored = score_candidates(pool, target_distance_m, requirements, facilities)
+    """Natural-match-first, then PROGRESSIVE constrained planning.
 
-    fully_valid_count = sum(1 for s in scored if s.fully_valid)
+    Each applicable constrained planner runs one at a time, folding its
+    candidates into the pool and re-scoring immediately -- if that's
+    already enough fully-valid candidates for `count`, later planners are
+    skipped entirely rather than run unconditionally. This is a latency
+    optimization only: the final scorer/ranker (`rank_key`, applied by
+    `score_candidates`) stays the sole authority on which candidates are
+    "good," so early exit can never promote a worse hard-constraint tier
+    just because it arrived first -- it only avoids paying for search
+    effort that a stronger tier already made unnecessary.
+
+    A shared `PlanningDeadline` bounds total constrained-search wall
+    time across ALL planners in this call (not per-planner) -- see
+    `app/facilities/planning_deadline.py`. If the deadline expires
+    mid-search, whatever candidates were already built are kept and
+    scored normally; the budget limits search effort, never correctness
+    labeling.
+    """
+    total_start = time.perf_counter()
+
+    pool = natural_match_pool(graph, start, target_distance_m, shape, count, requirements)
+    natural_generation_s = time.perf_counter() - total_start
+
+    score_start = time.perf_counter()
+    scored = score_candidates(pool, target_distance_m, requirements, facilities)
+    natural_scoring_s = time.perf_counter() - score_start
+
+    fully_valid_natural = sum(1 for s in scored if s.fully_valid)
+    fully_valid_count = fully_valid_natural
+
+    planner_timings: dict[str, float] = {}
+    budget_exhausted = False
+
     if constrained_planners and requirements and fully_valid_count < count:
-        extra: list[GeneratedRoute] = []
+        deadline = PlanningDeadline()
+        combined_pool = pool
+        existing_keys = {_geometry_key(r.route) for r in scored}
+
         for planner in constrained_planners:
-            extra.extend(
-                planner(
-                    graph, start, target_distance_m, shape, count, requirements, facilities
-                )
+            if deadline.expired():
+                break
+
+            planner_start = time.perf_counter()
+            new_candidates = planner(
+                graph, start, target_distance_m, shape, count, requirements, facilities,
+                deadline,
             )
-        if extra:
-            existing_keys = {
-                tuple((p.lat, p.lon) for p in r.route.candidate.geometry) for r in scored
-            }
-            new_routes = [
-                route
-                for route in extra
-                if tuple((p.lat, p.lon) for p in route.candidate.geometry)
-                not in existing_keys
-            ]
+            planner_timings[planner.__name__] = time.perf_counter() - planner_start
+
+            new_routes = [r for r in new_candidates if _geometry_key(r) not in existing_keys]
+            if not new_routes:
+                continue
+
+            combined_pool = combined_pool + new_routes
+            existing_keys |= {_geometry_key(r) for r in new_routes}
+
             scored = score_candidates(
-                pool + new_routes, target_distance_m, requirements, facilities
+                combined_pool, target_distance_m, requirements, facilities
             )
+            fully_valid_count = sum(1 for s in scored if s.fully_valid)
+
+            if fully_valid_count >= count:
+                # Progressive early exit: the pool is already sufficient,
+                # so the remaining planners' expensive search is skipped.
+                break
+
+        budget_exhausted = deadline.expired()
+
+    total_s = time.perf_counter() - total_start
+    planner_timing_str = " ".join(f"{name}_s={t:.3f}" for name, t in planner_timings.items())
+    logger.info(
+        "route_plan timing requirements=%d shape=%s natural_generation_s=%.3f "
+        "natural_scoring_s=%.3f %stotal_s=%.3f fully_valid_natural=%d "
+        "fully_valid_final=%d budget_exhausted=%s",
+        len(requirements),
+        shape,
+        natural_generation_s,
+        natural_scoring_s,
+        planner_timing_str + " " if planner_timing_str else "",
+        total_s,
+        fully_valid_natural,
+        fully_valid_count,
+        budget_exhausted,
+    )
 
     if shape == "mix":
         return _select_mix_portfolio(scored, count)

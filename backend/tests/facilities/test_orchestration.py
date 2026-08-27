@@ -1,12 +1,17 @@
+from typing import Any
 from unittest.mock import patch
 
+from app.facilities.models import Facility
 from app.facilities.orchestration import (
+    ConstrainedPlanner,
     ScoredRoute,
     _select_mix_portfolio,
     natural_match_pool,
+    plan_routes,
     score_candidates,
 )
 from app.facilities.models import FacilityRequirement, RequirementResult
+from app.facilities.planning_deadline import PlanningDeadline
 from app.facilities.scoring import FacilityScore, is_fully_valid
 from app.generation.routes import GeneratedRoute, QualityMetrics
 from app.routing.provider import Coordinate, RouteCandidate, RoutePoint
@@ -71,10 +76,12 @@ def test_with_requirements_requests_overcomplete_pool() -> None:
         assert called_pool_size > 3
 
 
-def _route(shape: str, edge_reuse_ratio: float, distance_m: float = 8000.0) -> GeneratedRoute:
+def _route(
+    shape: str, edge_reuse_ratio: float, distance_m: float = 8000.0, lat_offset: float = 0.0
+) -> GeneratedRoute:
     geometry = (
-        RoutePoint(lat=40.0, lon=-73.0, elevation_m=0.0),
-        RoutePoint(lat=40.01, lon=-73.0, elevation_m=0.0),
+        RoutePoint(lat=40.0 + lat_offset, lon=-73.0, elevation_m=0.0),
+        RoutePoint(lat=40.01 + lat_offset, lon=-73.0, elevation_m=0.0),
     )
     candidate = RouteCandidate(geometry=geometry, distance_m=distance_m, elevation_gain_m=0.0)
     quality = QualityMetrics(
@@ -251,3 +258,158 @@ def test_mix_portfolio_worse_facility_miss_not_masked_by_tied_satisfied_count() 
 
     assert result == [round_a, round_b]
     assert oab_c not in result
+
+
+# --- Progressive constrained planning -----------------------------------
+
+
+def _make_planner(name: str, batches: list[list[GeneratedRoute]]) -> tuple[ConstrainedPlanner, list[int]]:
+    """A fake constrained planner returning one pre-built batch of
+    `GeneratedRoute`s per call (empty once `batches` is exhausted), so
+    tests can assert exactly how many times -- if any -- it was
+    invoked."""
+    call_count = [0]
+
+    def planner(
+        graph: Any,
+        start: Coordinate,
+        target_distance_m: float,
+        shape: str,
+        count: int,
+        requirements: list[FacilityRequirement],
+        facilities: list[Facility],
+        deadline: PlanningDeadline,
+    ) -> list[GeneratedRoute]:
+        index = call_count[0]
+        call_count[0] += 1
+        return batches[index] if index < len(batches) else []
+
+    planner.__name__ = name
+    return planner, call_count
+
+
+_REQ = FacilityRequirement(id="r1", kind="restroom", min_distance_m=0, max_distance_m=1000)
+
+
+def test_progressive_planning_skips_second_planner_when_first_is_sufficient() -> None:
+    """Planner 1 alone makes the pool fully sufficient for `count` -- the
+    second planner must never be called."""
+    planner_one, calls_one = _make_planner(
+        "planner_one",
+        [
+            [
+                _route("round", 0.0, 8000.0, lat_offset=3.00),
+                _route("round", 0.0, 8000.0, lat_offset=3.01),
+                _route("round", 0.0, 8000.0, lat_offset=3.02),
+            ]
+        ],
+    )
+    planner_two, calls_two = _make_planner(
+        "planner_two", [[_route("round", 0.0, 8000.0, lat_offset=4.00)]]
+    )
+
+    natural_scored = [_scored("round", 0.00, satisfied=0, total=1)]
+    sufficient_scored = [
+        _scored("round", 0.01, satisfied=1, total=1),
+        _scored("round", 0.02, satisfied=1, total=1),
+        _scored("round", 0.03, satisfied=1, total=1),
+    ]
+
+    with (
+        patch(
+            "app.facilities.orchestration.natural_match_pool",
+            return_value=[_route("round", 0.0, 8000.0)],
+        ),
+        patch(
+            "app.facilities.orchestration.score_candidates",
+            side_effect=[natural_scored, sufficient_scored],
+        ),
+    ):
+        result = plan_routes(
+            graph=object(),
+            start=Coordinate(lat=40.0, lon=-73.0),
+            target_distance_m=8000.0,
+            shape="round",
+            count=3,
+            requirements=[_REQ],
+            facilities=[],
+            constrained_planners=[planner_one, planner_two],
+        )
+
+    assert calls_one[0] == 1
+    assert calls_two[0] == 0
+    assert len(result) == 3
+
+
+def test_progressive_planning_runs_second_planner_when_still_insufficient() -> None:
+    """Planner 1 alone isn't enough -- planner 2 must still run."""
+    planner_one, calls_one = _make_planner(
+        "planner_one", [[_route("round", 0.0, 8000.0, lat_offset=3.00)]]
+    )
+    planner_two, calls_two = _make_planner(
+        "planner_two",
+        [
+            [
+                _route("round", 0.0, 8000.0, lat_offset=4.00),
+                _route("round", 0.0, 8000.0, lat_offset=4.01),
+            ]
+        ],
+    )
+
+    natural_scored = [_scored("round", 0.00, satisfied=0, total=1)]
+    after_planner_one = [_scored("round", 0.01, satisfied=0, total=1)]
+    after_planner_two = [
+        _scored("round", 0.02, satisfied=1, total=1),
+        _scored("round", 0.03, satisfied=1, total=1),
+        _scored("round", 0.04, satisfied=1, total=1),
+    ]
+
+    with (
+        patch(
+            "app.facilities.orchestration.natural_match_pool",
+            return_value=[_route("round", 0.0, 8000.0)],
+        ),
+        patch(
+            "app.facilities.orchestration.score_candidates",
+            side_effect=[natural_scored, after_planner_one, after_planner_two],
+        ),
+    ):
+        result = plan_routes(
+            graph=object(),
+            start=Coordinate(lat=40.0, lon=-73.0),
+            target_distance_m=8000.0,
+            shape="round",
+            count=3,
+            requirements=[_REQ],
+            facilities=[],
+            constrained_planners=[planner_one, planner_two],
+        )
+
+    assert calls_one[0] == 1
+    assert calls_two[0] == 1
+    assert len(result) == 3
+
+
+def test_no_facility_request_never_invokes_constrained_planners() -> None:
+    """Regression guard: an ordinary no-facility request must never pay
+    for constrained-planner search machinery, progressive or not."""
+    planner_one, calls_one = _make_planner("planner_one", [[_route("round", 0.0, 8000.0)]])
+    planner_two, calls_two = _make_planner("planner_two", [[_route("round", 0.0, 8000.0)]])
+
+    with patch(
+        "app.facilities.orchestration.natural_match_pool",
+        return_value=[_route("round", 0.0, 8000.0)],
+    ):
+        plan_routes(
+            graph=object(),
+            start=Coordinate(lat=40.0, lon=-73.0),
+            target_distance_m=8000.0,
+            shape="round",
+            count=3,
+            requirements=[],
+            facilities=[],
+            constrained_planners=[planner_one, planner_two],
+        )
+
+    assert calls_one[0] == 0
+    assert calls_two[0] == 0

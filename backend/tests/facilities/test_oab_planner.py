@@ -15,7 +15,8 @@ import app.facilities.oab_planner as oab_planner
 from app.facilities.assignment import assign_requirements
 from app.facilities.encounters import find_facility_encounters
 from app.facilities.models import Facility, FacilityRequirement
-from app.facilities.oab_planner import plan_constrained_out_and_back
+from app.facilities.oab_planner import _adaptive_build_budget, plan_constrained_out_and_back
+from app.facilities.planning_deadline import PlanningDeadline
 from app.graph.distances import nearest_node, single_source_paths
 from app.graph.loader import GRAPH_PATH, get_graph
 from app.graph.model import node_coordinate
@@ -360,3 +361,87 @@ def test_bounded_search_calls_scale_linearly_not_exponentially(
         assert total_calls <= max_builds * (n + 1), (
             f"n={n} made {total_calls} real-graph calls, exceeding the linear bound"
         )
+
+
+# --- Requirement-adaptive build budget & cooperative deadline -----------
+
+
+def test_adaptive_build_budget_by_requirement_count() -> None:
+    assert _adaptive_build_budget(1) == oab_planner.MAX_FULL_BUILDS_PER_CALL
+    assert _adaptive_build_budget(2) == 5
+    assert _adaptive_build_budget(3) == 3
+    assert _adaptive_build_budget(6) == 3
+
+
+@pytestmark_graph
+def test_already_expired_deadline_returns_no_candidates() -> None:
+    graph = get_graph()
+    target_m = 8000.0
+    start_node = nearest_node(graph, START)
+    dists, _paths = single_source_paths(graph, start_node)
+    start_coord = node_coordinate(graph, start_node)
+
+    radial = target_m / 6.0
+    node = _node_near_bearing(graph, start_coord, dists, radial, 0.0, tol_b=180.0)
+    assert node is not None, "graph topology near the test start point changed"
+
+    req = FacilityRequirement(
+        id="r1", kind="restroom",
+        min_distance_m=dists[node] - 400, max_distance_m=dists[node] + 400,
+    )
+    fac = _facility_at(graph, node, "restroom", "restroom:1")
+
+    routes = plan_constrained_out_and_back(
+        graph, START, target_m, "out_and_back", 3, [req], [fac],
+        deadline=PlanningDeadline(budget_s=-1.0),
+    )
+    assert routes == []
+
+
+@pytestmark_graph
+def test_deadline_expiring_mid_search_keeps_partial_candidates(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """If the deadline expires right after one useful build completes,
+    that candidate must still be returned rather than discarded. Ties
+    expiry to a successful build (not a raw call count) so the test
+    doesn't depend on how many build attempts internally fail first."""
+    build_count = {"n": 0}
+    orig_build_plan = oab_planner._build_plan
+
+    def counted_build_plan(*args: object, **kwargs: object):  # type: ignore[no-untyped-def]
+        result = orig_build_plan(*args, **kwargs)  # type: ignore[arg-type]
+        if result is not None:
+            build_count["n"] += 1
+        return result
+
+    monkeypatch.setattr("app.facilities.oab_planner._build_plan", counted_build_plan)
+
+    class _ExpireAfterOneBuild(PlanningDeadline):
+        def __init__(self) -> None:
+            super().__init__(budget_s=9999.0)
+
+        def expired(self) -> bool:
+            return build_count["n"] >= 1
+
+    graph = get_graph()
+    target_m = 8000.0
+    start_node = nearest_node(graph, START)
+    dists, _paths = single_source_paths(graph, start_node)
+    start_coord = node_coordinate(graph, start_node)
+
+    radial = target_m / 6.0
+    node = _node_near_bearing(graph, start_coord, dists, radial, 0.0, tol_b=180.0)
+    assert node is not None, "graph topology near the test start point changed"
+
+    req = FacilityRequirement(
+        id="r1", kind="restroom",
+        min_distance_m=dists[node] - 400, max_distance_m=dists[node] + 400,
+    )
+    fac = _facility_at(graph, node, "restroom", "restroom:1")
+
+    routes = plan_constrained_out_and_back(
+        graph, START, target_m, "out_and_back", 3, [req], [fac],
+        deadline=_ExpireAfterOneBuild(),
+    )
+    assert len(routes) == 1

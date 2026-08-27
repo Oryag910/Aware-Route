@@ -3,6 +3,7 @@ import { useRef, useState } from "react";
 import {
   ApiError,
   NetworkError,
+  TimeoutError,
   fetchRoutes,
   type GenericRoute,
 } from "./api";
@@ -34,11 +35,16 @@ type ErrorKind =
   | "facility_data_unavailable"
   | "routing_unavailable"
   | "network"
+  | "request_timeout"
   | "server";
 
 type AppError = { kind: ErrorKind; detail?: string };
 
 function classifyError(caughtError: unknown): AppError {
+  if (caughtError instanceof TimeoutError) {
+    return { kind: "request_timeout" };
+  }
+
   if (caughtError instanceof NetworkError) {
     return { kind: "network" };
   }
@@ -291,6 +297,23 @@ function App() {
           }
         >
           We couldn't reach the routing service. Try again in a moment.
+        </StatusMessage>
+      )}
+
+      {appError?.kind === "request_timeout" && (
+        <StatusMessage
+          variant="warning"
+          heading="This route is taking too long to calculate"
+          actions={
+            lastValues !== null ? (
+              <InlineAction onClick={() => void runSearch(lastValues)}>
+                Try again
+              </InlineAction>
+            ) : undefined
+          }
+        >
+          Try fewer facility requirements, wider mile ranges, a shorter
+          route, or try again.
         </StatusMessage>
       )}
 
