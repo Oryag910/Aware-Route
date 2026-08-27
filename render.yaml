@@ -2,13 +2,18 @@ services:
   - type: web
     name: run-route-backend
     env: docker
-    plan: free
+    plan: starter
     dockerfilePath: ./backend/Dockerfile
     dockerContext: ./backend
     healthCheckPath: /health
     previews:
       generation: automatic
-      plan: free
+      # Temporarily Starter (matching production) for a production-
+      # equivalent PR-preview latency validation pass -- see PR #25.
+      # Revisit after that pass: Free previews are cheaper and adequate
+      # for correctness/CI, but are not representative for CPU-bound
+      # performance benchmarking.
+      plan: starter
     envVars:
       - key: ORS_API_KEY
         sync: false
