@@ -231,14 +231,23 @@ def _extend_to_turnaround(
     start_coord: Coordinate,
     corridor_bearing: float,
     used_pairs: set[frozenset[int]],
+    deadline: PlanningDeadline,
 ) -> list[int] | None:
     """Real (bounded) Dijkstra from `last_node`, picking an extension
     target whose cumulative distance from start lands closest to
     `target_half_m`, filtered to roughly continue the corridor bearing.
     Returns the reuse-penalized leg node list (including `last_node` as
     its first element), or None if no extension leg is reachable/needed
-    (waypoints already meet or exceed `target_half_m`)."""
+    (waypoints already meet or exceed `target_half_m`).
+
+    `deadline` is checked before the `single_source_distances` Dijkstra
+    and again before the extension's own `reuse_penalized_path` call --
+    an expired budget at either point returns `None` (no extension)
+    rather than starting more graph work."""
     if cumulative_so_far_m >= target_half_m:
+        return None
+
+    if deadline.expired():
         return None
 
     local_dists = single_source_distances(graph, last_node)
@@ -261,6 +270,9 @@ def _extend_to_turnaround(
             best_node = node
 
     if best_node is None:
+        return None
+
+    if deadline.expired():
         return None
 
     return reuse_penalized_path(graph, last_node, best_node, used_pairs)
@@ -349,7 +361,7 @@ def plan_constrained_out_and_back(
 
             route = _build_plan(
                 graph, start_node, list(waypoint_nodes), paths, target_distance_m,
-                start_coord, corridor_bearing,
+                start_coord, corridor_bearing, deadline,
             )
             if route is None:
                 continue
@@ -372,10 +384,21 @@ def _build_plan(
     target_distance_m: float,
     start_coord: Coordinate,
     corridor_bearing: float,
+    deadline: PlanningDeadline,
 ) -> GeneratedRoute | None:
     """Real build for one ordered waypoint sequence: start -> waypoints in
-    order -> (optional) turnaround extension -> mirrored return leg."""
+    order -> (optional) turnaround extension -> mirrored return leg.
+
+    `deadline` is checked before each waypoint-to-waypoint
+    `reuse_penalized_path` call and again before the extension step
+    (`_extend_to_turnaround` re-checks it internally too). An expired
+    budget mid-build returns `None` -- this function never returns a
+    partial/incomplete route; the caller simply discards it and keeps
+    whatever earlier candidates it already built."""
     if not waypoint_nodes:
+        return None
+
+    if deadline.expired():
         return None
 
     try:
@@ -387,6 +410,8 @@ def _build_plan(
     used = edge_pairs(outbound_full_path)
 
     for waypoint in waypoint_nodes[1:]:
+        if deadline.expired():
+            return None
         leg = reuse_penalized_path(graph, outbound_full_path[-1], waypoint, used)
         if leg is None:
             return None
@@ -404,6 +429,7 @@ def _build_plan(
         start_coord,
         corridor_bearing,
         used,
+        deadline,
     )
     if extension is not None and len(extension) > 1:
         outbound_full_path += extension[1:]

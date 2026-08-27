@@ -154,12 +154,13 @@ function apiUrl(path: string): string {
 
 const METERS_PER_MILE = 1609.34;
 
-// Backend constrained planning is bounded to a ~25s wall-clock budget
-// (see `ROUTE_PLANNING_BUDGET_S` server-side) so a difficult multi-facility
-// request always returns well before this fires. The margin above that
-// budget covers network latency, response serialization, and proxy
-// overhead -- this is a client-side fail-safe, not the actual planning
-// deadline.
+// Backend constrained planning targets a ~25s cooperative wall-clock budget
+// (see `ROUTE_PLANNING_BUDGET_S` server-side) -- checked before each
+// expensive graph-routing step, not a hard preemptive cutoff, so actual
+// worst-case backend time can exceed 25s by roughly one already-running
+// graph operation. This value is a client-side UX fail-safe with margin
+// for that, plus network latency, response serialization, and proxy
+// overhead -- it does not cancel or otherwise affect backend work.
 export const ROUTE_REQUEST_TIMEOUT_MS = 35_000;
 
 export async function fetchRoutes(

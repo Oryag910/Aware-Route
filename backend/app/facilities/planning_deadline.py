@@ -4,9 +4,25 @@ Constrained facility planners run synchronous, CPU-heavy NetworkX work
 in-process. Wrapping that work in `asyncio.wait_for` would not actually
 interrupt it -- cancellation only takes effect at an `await` point, and
 none of the graph-build/Dijkstra work yields control. Instead, planners
-check `PlanningDeadline.expired()` cooperatively between expensive steps
-(before each real graph build) and simply stop proposing new candidates
-once the budget is spent.
+check `PlanningDeadline.expired()` cooperatively before each expensive
+graph-routing operation (real graph builds, individual Dijkstra/
+shortest-path calls within a build -- see `round_planner.py`,
+`oab_planner.py`, and `app/generation/polygon_loop.py`'s
+`should_continue` callback) and simply stop proposing new work once the
+budget is spent.
+
+IMPORTANT: this is a COOPERATIVE budget, not a preemptive one. Nothing
+here can interrupt a single graph operation that's already running --
+there is no multiprocessing/threading/signal-based cancellation in this
+design, deliberately (see round_planner.py/oab_planner.py module docs).
+So the actual worst-case bound this gives is:
+
+    configured budget + (at most one already-running graph operation)
+
+not a mathematically exact cutoff at the configured budget. Checkpoints
+are placed as granularly as practical (before each build, and before
+each expensive step WITHIN a build) specifically to keep that "one
+operation" term small, but it is never exactly zero.
 
 The deadline only limits SEARCH EFFORT. It never decides correctness --
 a candidate built before the deadline expired is scored exactly like any

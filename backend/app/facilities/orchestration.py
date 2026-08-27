@@ -295,13 +295,21 @@ def plan_routes(
     just because it arrived first -- it only avoids paying for search
     effort that a stronger tier already made unnecessary.
 
-    A shared `PlanningDeadline` bounds total constrained-search wall
-    time across ALL planners in this call (not per-planner) -- see
-    `app/facilities/planning_deadline.py`. If the deadline expires
+    The `PlanningDeadline` is started at the very top of this call --
+    covering natural generation and scoring too, not just constrained
+    search -- so a slow natural phase leaves correspondingly less
+    budget for constrained planners rather than getting the full 25s on
+    top. It is a COOPERATIVE budget, not a hard preemptive cutoff:
+    checked before each expensive graph-routing operation in the
+    constrained planners (see `app/facilities/planning_deadline.py` and
+    `app/facilities/round_planner.py`/`oab_planner.py`), so actual
+    overshoot is bounded by roughly one already-running synchronous
+    graph operation, not by the budget itself. If the deadline expires
     mid-search, whatever candidates were already built are kept and
     scored normally; the budget limits search effort, never correctness
     labeling.
     """
+    deadline = PlanningDeadline()
     total_start = time.perf_counter()
 
     pool = natural_match_pool(graph, start, target_distance_m, shape, count, requirements)
@@ -318,7 +326,6 @@ def plan_routes(
     budget_exhausted = False
 
     if constrained_planners and requirements and fully_valid_count < count:
-        deadline = PlanningDeadline()
         combined_pool = pool
         existing_keys = {_geometry_key(r.route) for r in scored}
 

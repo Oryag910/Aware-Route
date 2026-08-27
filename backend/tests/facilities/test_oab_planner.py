@@ -445,3 +445,119 @@ def test_deadline_expiring_mid_search_keeps_partial_candidates(
         deadline=_ExpireAfterOneBuild(),
     )
     assert len(routes) == 1
+
+
+# --- Inner deadline checkpoints (`_build_plan` / `_extend_to_turnaround`) --
+
+
+class _ExpireAfterNChecks(PlanningDeadline):
+    """Expires starting from the (N+1)th call to `.expired()` -- lets a
+    test allow exactly N checkpoints to pass before cutting off the
+    next expensive operation, deterministically and without relying on
+    real wall-clock timing."""
+
+    def __init__(self, allow_calls: int) -> None:
+        super().__init__(budget_s=9999.0)
+        self._allow_calls = allow_calls
+        self._calls = 0
+
+    def expired(self) -> bool:
+        self._calls += 1
+        return self._calls > self._allow_calls
+
+
+@pytestmark_graph
+def test_build_plan_stops_between_waypoint_legs_when_expired(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """3 waypoints along the same corridor: allow the top-level check and
+    the first leg's check to pass, then expire before the second leg --
+    the second `reuse_penalized_path` call must never happen, and the
+    function must return None (no partial route)."""
+    graph = get_graph()
+    target_m = 8000.0
+    start_node = nearest_node(graph, START)
+    dists, paths = single_source_paths(graph, start_node)
+    start_coord = node_coordinate(graph, start_node)
+
+    n0 = _node_near_bearing(graph, start_coord, dists, target_m / 8.0, 0.0, tol_b=180.0)
+    n1 = _node_near_bearing(graph, start_coord, dists, target_m / 5.0, 0.0, tol_b=180.0)
+    n2 = _node_near_bearing(graph, start_coord, dists, target_m / 3.0, 0.0, tol_b=180.0)
+    assert n0 is not None and n1 is not None and n2 is not None, (
+        "graph topology near the test start point changed"
+    )
+
+    call_count = {"n": 0}
+    orig_reuse = oab_planner.reuse_penalized_path  # type: ignore[attr-defined]
+
+    def counted_reuse(*args: object, **kwargs: object):  # type: ignore[no-untyped-def]
+        call_count["n"] += 1
+        return orig_reuse(*args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(oab_planner, "reuse_penalized_path", counted_reuse)
+
+    corridor_bearing = bearing_deg(start_coord, node_coordinate(graph, n2))
+    # allow_calls=2: the top-of-function check (1) and the pre-leg check
+    # for n1 (2) pass; the pre-leg check for n2 (3) does not.
+    deadline = _ExpireAfterNChecks(allow_calls=2)
+
+    result = oab_planner._build_plan(
+        graph, start_node, [n0, n1, n2], paths, target_m, start_coord, corridor_bearing, deadline,
+    )
+
+    assert result is None
+    assert call_count["n"] == 1  # only the n1 leg ran; n2's leg never started
+
+
+@pytestmark_graph
+def test_extend_to_turnaround_skips_distances_when_already_expired() -> None:
+    graph = get_graph()
+    target_m = 8000.0
+    start_node = nearest_node(graph, START)
+    dists, _paths = single_source_paths(graph, start_node)
+    start_coord = node_coordinate(graph, start_node)
+
+    deadline = _ExpireAfterNChecks(allow_calls=0)
+
+    result = oab_planner._extend_to_turnaround(
+        graph, start_node, cumulative_so_far_m=1000.0, target_half_m=target_m / 2.0,
+        start_coord=start_coord, corridor_bearing=0.0, used_pairs=set(), deadline=deadline,
+    )
+
+    assert result is None
+
+
+@pytestmark_graph
+def test_extend_to_turnaround_skips_extension_path_after_distances_when_expired(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Allow the pre-`single_source_distances` check to pass, then expire
+    before the extension's own `reuse_penalized_path` call -- distances
+    get computed (needed to pick a turnaround target) but no extension
+    leg is actually built."""
+    graph = get_graph()
+    target_m = 8000.0
+    start_node = nearest_node(graph, START)
+    dists, _paths = single_source_paths(graph, start_node)
+    start_coord = node_coordinate(graph, start_node)
+
+    reuse_calls = {"n": 0}
+    orig_reuse = oab_planner.reuse_penalized_path  # type: ignore[attr-defined]
+
+    def counted_reuse(*args: object, **kwargs: object):  # type: ignore[no-untyped-def]
+        reuse_calls["n"] += 1
+        return orig_reuse(*args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(oab_planner, "reuse_penalized_path", counted_reuse)
+
+    # allow_calls=1: the pre-single_source_distances check (1) passes;
+    # the pre-extension-path check (2) does not.
+    deadline = _ExpireAfterNChecks(allow_calls=1)
+
+    result = oab_planner._extend_to_turnaround(
+        graph, start_node, cumulative_so_far_m=1000.0, target_half_m=target_m / 2.0,
+        start_coord=start_coord, corridor_bearing=0.0, used_pairs=set(), deadline=deadline,
+    )
+
+    assert result is None
+    assert reuse_calls["n"] == 0

@@ -264,13 +264,22 @@ def _build_plan(
     ordered: list[_PlacedRequirement],
     plan: _Plan,
     paths: dict[int, list[int]] | None,
+    deadline: PlanningDeadline,
 ) -> tuple[RouteCandidate, list[int]] | None:
+    # A single `should_continue` closure over the SAME request-wide
+    # deadline object is threaded into every expensive step below --
+    # `polygon_loop.py` has no facilities-specific `PlanningDeadline`
+    # type of its own, just this neutral callback (see
+    # `_build_loop_via_waypoints`'s docstring).
+    should_continue = lambda: not deadline.expired()  # noqa: E731
+
     waypoints_at_scale = _waypoints_at_scale(
         start_coord, target_distance_m, template, ordered, plan.node_ids
     )
     calibration = _affine_calibration_scale_via(
         graph, start_node, node_index, waypoints_at_scale, target_distance_m, paths,
         min_scale=ROUND_PLANNER_MIN_SCALE,
+        should_continue=should_continue,
     )
     result = _tune_waypoints(
         graph, start_node, node_index, waypoints_at_scale, target_distance_m,
@@ -278,6 +287,7 @@ def _build_plan(
         min_scale=ROUND_PLANNER_MIN_SCALE,
         max_correction_attempts=ROUND_PLANNER_MAX_CORRECTION_ATTEMPTS,
         use_secant_refinement=True,
+        should_continue=should_continue,
     )
     if result is None:
         return None
@@ -366,7 +376,7 @@ def plan_constrained_round(
 
         built = _build_plan(
             graph, start_node, node_index, start_coord, target_distance_m,
-            template, ordered, plan, paths,
+            template, ordered, plan, paths, deadline,
         )
         if built is None:
             continue

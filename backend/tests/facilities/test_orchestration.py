@@ -1,5 +1,8 @@
+import time
 from typing import Any
 from unittest.mock import patch
+
+import pytest
 
 from app.facilities.models import Facility
 from app.facilities.orchestration import (
@@ -413,3 +416,47 @@ def test_no_facility_request_never_invokes_constrained_planners() -> None:
 
     assert calls_one[0] == 0
     assert calls_two[0] == 0
+
+
+def test_deadline_starts_before_natural_generation(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The planning deadline must cover natural generation + scoring, not
+    just the constrained-planner phase -- a slow natural phase should
+    leave correspondingly less of the total budget for planners, rather
+    than each phase getting its own fresh budget."""
+    monkeypatch.setenv("ROUTE_PLANNING_BUDGET_S", "0.2")
+
+    def slow_natural_match_pool(*_args: object, **_kwargs: object) -> list[GeneratedRoute]:
+        time.sleep(0.15)
+        return [_route("round", 0.0, 8000.0)]
+
+    captured: dict[str, float] = {}
+
+    def planner(
+        graph: Any, start: Coordinate, target_distance_m: float, shape: str, count: int,
+        requirements: list[FacilityRequirement], facilities: list[Facility],
+        deadline: PlanningDeadline,
+    ) -> list[GeneratedRoute]:
+        captured["remaining"] = deadline.remaining()
+        return []
+
+    planner.__name__ = "spy_planner"
+
+    with patch(
+        "app.facilities.orchestration.natural_match_pool",
+        side_effect=slow_natural_match_pool,
+    ):
+        plan_routes(
+            graph=object(),
+            start=Coordinate(lat=40.0, lon=-73.0),
+            target_distance_m=8000.0,
+            shape="round",
+            count=3,
+            requirements=[_REQ],
+            facilities=[],
+            constrained_planners=[planner],
+        )
+
+    # Of the 0.2s total budget, ~0.15s was already spent by the time the
+    # constrained planner runs -- it must see well under the full budget,
+    # not a fresh 0.2s of its own.
+    assert captured["remaining"] < 0.1
