@@ -8,12 +8,10 @@ services:
     healthCheckPath: /health
     previews:
       generation: automatic
-      # Temporarily Starter (matching production) for a production-
-      # equivalent PR-preview latency validation pass -- see PR #25.
-      # Revisit after that pass: Free previews are cheaper and adequate
-      # for correctness/CI, but are not representative for CPU-bound
-      # performance benchmarking.
-      plan: starter
+      # Free previews are sufficient for correctness/CI. Use Starter
+      # temporarily when production-equivalent performance validation
+      # is needed.
+      plan: free
     envVars:
       - key: ORS_API_KEY
         sync: false
