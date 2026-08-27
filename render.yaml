@@ -2,12 +2,15 @@ services:
   - type: web
     name: run-route-backend
     env: docker
-    plan: free
+    plan: starter
     dockerfilePath: ./backend/Dockerfile
     dockerContext: ./backend
     healthCheckPath: /health
     previews:
       generation: automatic
+      # Free previews are sufficient for correctness/CI. Use Starter
+      # temporarily when production-equivalent performance validation
+      # is needed.
       plan: free
     envVars:
       - key: ORS_API_KEY

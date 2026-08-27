@@ -16,22 +16,37 @@ into the same pool before scoring, so one scorer/ranker stays
 authoritative for both natural and constrained candidates.
 """
 
+import logging
+import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any, Literal
 
 from app.facilities.diversity import select_diverse
 from app.facilities.models import Facility, FacilityRequirement
+from app.facilities.planning_deadline import PlanningDeadline
 from app.facilities.scoring import (
     FacilityScore,
     is_fully_valid,
     rank_key,
     score_facility_requirements,
 )
+from app.facilities.spatial_index import FacilitySpatialIndex
 from app.generation.engine import generate_routes
 from app.generation.routes import GeneratedRoute
 from app.routing.provider import Coordinate
 
+
+# The app configures no explicit logging (no `logging.basicConfig`, no
+# uvicorn `--log-config`), so a plain `logging.getLogger(__name__)`
+# logger has no handler and an effective level of WARNING inherited
+# from the unconfigured root logger -- `.info()` calls on it are
+# silently dropped, never reaching stdout/Render's log capture.
+# Uvicorn DOES configure "uvicorn.error" (and "uvicorn.access") with a
+# stdout handler at INFO level on startup, so route_plan timing reuses
+# that already-configured logger rather than adding any new logging
+# setup of our own.
+logger = logging.getLogger("uvicorn.error")
 
 Shape = Literal["round", "out_and_back", "mix"]
 
@@ -90,12 +105,23 @@ def score_candidates(
     target_distance_m: float,
     requirements: list[FacilityRequirement],
     facilities: list[Facility],
+    facility_index: FacilitySpatialIndex | None = None,
+    timing: dict[str, float] | None = None,
 ) -> list[ScoredRoute]:
+    """`facility_index` lets a caller scoring the same `facilities` list
+    across many candidates/rescoring passes (see `plan_routes`) build the
+    spatial index once and reuse it, instead of rebuilding it on every
+    call -- if omitted, a private index is built for this call only.
+    `timing`, if given, is passed through to `score_facility_requirements`
+    to accumulate encounter/assignment timing across every route scored."""
+    index = facility_index if facility_index is not None else FacilitySpatialIndex(facilities)
     scored: list[ScoredRoute] = []
     for route in routes:
         geometry = route.candidate.geometry
         distance_error = abs(route.candidate.distance_m - target_distance_m)
-        facility_score = score_facility_requirements(geometry, requirements, facilities)
+        facility_score = score_facility_requirements(
+            geometry, requirements, facilities, facility_index=index, timing=timing
+        )
         quality = _quality_score(route)
         scored.append(
             ScoredRoute(
@@ -253,13 +279,18 @@ def _select_mix_portfolio(scored: list[ScoredRoute], count: int) -> list[ScoredR
 
 
 # Signature for a constrained-planner hook: given the same inputs
-# `plan_routes` receives, return extra `GeneratedRoute` candidates to
-# fold into the same pool before scoring. Phase 3/4/5 register planners
-# here instead of forking the orchestration flow.
+# `plan_routes` receives plus the shared `PlanningDeadline` for this
+# request, return extra `GeneratedRoute` candidates to fold into the same
+# pool before scoring. Phase 3/4/5 register planners here instead of
+# forking the orchestration flow.
 ConstrainedPlanner = Callable[
-    [Any, Coordinate, float, Shape, int, list[FacilityRequirement], list[Facility]],
+    [Any, Coordinate, float, Shape, int, list[FacilityRequirement], list[Facility], PlanningDeadline],
     list[GeneratedRoute],
 ]
+
+
+def _geometry_key(route: GeneratedRoute) -> tuple[tuple[float, float], ...]:
+    return tuple((p.lat, p.lon) for p in route.candidate.geometry)
 
 
 def plan_routes(
@@ -273,37 +304,126 @@ def plan_routes(
     *,
     constrained_planners: list[ConstrainedPlanner] | None = None,
 ) -> list[ScoredRoute]:
-    """Natural-match-first planning. When `constrained_planners` are
-    given and natural matching doesn't yield `count` fully valid
-    candidates, each planner's extra candidates are folded into the
-    same pool before final scoring -- hard-constraint quality from
-    either source always outranks a prettier natural match (see
-    `rank_key`)."""
-    pool = natural_match_pool(graph, start, target_distance_m, shape, count, requirements)
-    scored = score_candidates(pool, target_distance_m, requirements, facilities)
+    """Natural-match-first, then PROGRESSIVE constrained planning.
 
-    fully_valid_count = sum(1 for s in scored if s.fully_valid)
+    Each applicable constrained planner runs one at a time, folding its
+    candidates into the pool and re-scoring immediately -- if that's
+    already enough fully-valid candidates for `count`, later planners are
+    skipped entirely rather than run unconditionally. This is a latency
+    optimization only: the final scorer/ranker (`rank_key`, applied by
+    `score_candidates`) stays the sole authority on which candidates are
+    "good," so early exit can never promote a worse hard-constraint tier
+    just because it arrived first -- it only avoids paying for search
+    effort that a stronger tier already made unnecessary.
+
+    The `PlanningDeadline` is started at the very top of this call --
+    covering natural generation and scoring too, not just constrained
+    search -- so a slow natural phase leaves correspondingly less
+    budget for constrained planners rather than getting the full 25s on
+    top. It is a COOPERATIVE budget, not a hard preemptive cutoff:
+    checked before each expensive graph-routing operation in the
+    constrained planners (see `app/facilities/planning_deadline.py` and
+    `app/facilities/round_planner.py`/`oab_planner.py`), so actual
+    overshoot is bounded by roughly one already-running synchronous
+    graph operation, not by the budget itself. If the deadline expires
+    mid-search, whatever candidates were already built are kept and
+    scored normally; the budget limits search effort, never correctness
+    labeling.
+    """
+    deadline = PlanningDeadline()
+    total_start = time.perf_counter()
+
+    # Built once and reused for every scoring pass below (natural, and
+    # every progressive-planner rescore) -- the facility catalog never
+    # changes mid-request, so there's no reason to rebuild the spatial
+    # index per candidate or per rescore (see FacilitySpatialIndex).
+    facility_index = FacilitySpatialIndex(facilities)
+    # Accumulates encounter-finding/assignment time across every
+    # scoring pass sharing this one dict -- see score_facility_requirements.
+    scoring_timing: dict[str, float] = {}
+
+    pool = natural_match_pool(graph, start, target_distance_m, shape, count, requirements)
+    natural_generation_s = time.perf_counter() - total_start
+    natural_candidates = len(pool)
+    natural_segments = sum(max(0, len(r.candidate.geometry) - 1) for r in pool)
+
+    score_start = time.perf_counter()
+    scored = score_candidates(
+        pool, target_distance_m, requirements, facilities,
+        facility_index=facility_index, timing=scoring_timing,
+    )
+    natural_scoring_s = time.perf_counter() - score_start
+
+    fully_valid_natural = sum(1 for s in scored if s.fully_valid)
+    fully_valid_count = fully_valid_natural
+
+    planner_timings: dict[str, float] = {}
+
     if constrained_planners and requirements and fully_valid_count < count:
-        extra: list[GeneratedRoute] = []
+        combined_pool = pool
+        existing_keys = {_geometry_key(r.route) for r in scored}
+
         for planner in constrained_planners:
-            extra.extend(
-                planner(
-                    graph, start, target_distance_m, shape, count, requirements, facilities
-                )
+            if deadline.expired():
+                break
+
+            planner_start = time.perf_counter()
+            new_candidates = planner(
+                graph, start, target_distance_m, shape, count, requirements, facilities,
+                deadline,
             )
-        if extra:
-            existing_keys = {
-                tuple((p.lat, p.lon) for p in r.route.candidate.geometry) for r in scored
-            }
-            new_routes = [
-                route
-                for route in extra
-                if tuple((p.lat, p.lon) for p in route.candidate.geometry)
-                not in existing_keys
-            ]
+            planner_timings[planner.__name__] = time.perf_counter() - planner_start
+
+            new_routes = [r for r in new_candidates if _geometry_key(r) not in existing_keys]
+            if not new_routes:
+                continue
+
+            combined_pool = combined_pool + new_routes
+            existing_keys |= {_geometry_key(r) for r in new_routes}
+
             scored = score_candidates(
-                pool + new_routes, target_distance_m, requirements, facilities
+                combined_pool, target_distance_m, requirements, facilities,
+                facility_index=facility_index, timing=scoring_timing,
             )
+            fully_valid_count = sum(1 for s in scored if s.fully_valid)
+
+            if fully_valid_count >= count:
+                # Progressive early exit: the pool is already sufficient,
+                # so the remaining planners' expensive search is skipped.
+                break
+
+    total_s = time.perf_counter() - total_start
+    # Computed unconditionally regardless of whether constrained planners
+    # ran -- the deadline covers the WHOLE call (including natural
+    # generation/scoring, see above), so a slow natural phase alone can
+    # legitimately exhaust the budget even though the graph-search
+    # cooperative checks (which only gate constrained-planner work) never
+    # got a chance to observe it. This field means "was the budget spent
+    # by the time we finished," not "did search work get cut off."
+    budget_exhausted = deadline.expired()
+
+    planner_timing_str = " ".join(f"{name}_s={t:.3f}" for name, t in planner_timings.items())
+    logger.info(
+        "route_plan timing requirements=%d shape=%s facilities=%d "
+        "natural_candidates=%d natural_segments=%d natural_generation_s=%.3f "
+        "natural_scoring_s=%.3f encounter_scoring_s=%.3f assignment_s=%.3f "
+        "%stotal_s=%.3f fully_valid_natural=%d "
+        "fully_valid_final=%d budget_exhausted=%s",
+        len(requirements),
+        shape,
+        len(facilities),
+        natural_candidates,
+        natural_segments,
+        natural_generation_s,
+        natural_scoring_s,
+        scoring_timing.get("encounter_s", 0.0),
+        scoring_timing.get("assignment_s", 0.0),
+        planner_timing_str + " " if planner_timing_str else "",
+        total_s,
+        fully_valid_natural,
+        fully_valid_count,
+        budget_exhausted,
+    )
 
     if shape == "mix":
         return _select_mix_portfolio(scored, count)

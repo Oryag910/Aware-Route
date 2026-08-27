@@ -35,6 +35,7 @@ the PR #18 spec. Never imports/modifies `app/generation/amenity_first.py`
 from typing import Any, Literal
 
 from app.facilities.models import Facility, FacilityRequirement, SnappedFacility
+from app.facilities.planning_deadline import PlanningDeadline
 from app.facilities.snapping import snap_facilities
 from app.generation.reuse_penalty import edge_pairs, reuse_penalized_path
 from app.generation.routes import GeneratedRoute, compute_quality
@@ -104,6 +105,25 @@ TURNAROUND_ANGULAR_TOLERANCE_DEG = 90.0
 # everything itself, so returning somewhat more than `count` candidates
 # is fine/expected.
 RESULT_CEILING = 8
+
+
+def _adaptive_build_budget(requirement_count: int) -> int:
+    """How many of `MAX_FULL_BUILDS_PER_CALL`'s expensive real-graph
+    builds this call gets, based on requirement count.
+
+    Mirrors `round_planner._adaptive_build_budget`'s rationale: the Aug
+    25 facility stress benchmark shows a single genuinely-hard
+    requirement is reliably solved at the full budget, while 2+
+    simultaneous hard requirements already succeed in only 0-2.8% of
+    stress cases even at full budget -- so the full budget is preserved
+    where it's proven to matter and shrunk where extra builds mostly
+    just add latency.
+    """
+    if requirement_count <= 1:
+        return MAX_FULL_BUILDS_PER_CALL
+    if requirement_count == 2:
+        return 5
+    return 3
 
 
 def _angular_distance(a: float, b: float) -> float:
@@ -211,14 +231,23 @@ def _extend_to_turnaround(
     start_coord: Coordinate,
     corridor_bearing: float,
     used_pairs: set[frozenset[int]],
+    deadline: PlanningDeadline,
 ) -> list[int] | None:
     """Real (bounded) Dijkstra from `last_node`, picking an extension
     target whose cumulative distance from start lands closest to
     `target_half_m`, filtered to roughly continue the corridor bearing.
     Returns the reuse-penalized leg node list (including `last_node` as
     its first element), or None if no extension leg is reachable/needed
-    (waypoints already meet or exceed `target_half_m`)."""
+    (waypoints already meet or exceed `target_half_m`).
+
+    `deadline` is checked before the `single_source_distances` Dijkstra
+    and again before the extension's own `reuse_penalized_path` call --
+    an expired budget at either point returns `None` (no extension)
+    rather than starting more graph work."""
     if cumulative_so_far_m >= target_half_m:
+        return None
+
+    if deadline.expired():
         return None
 
     local_dists = single_source_distances(graph, last_node)
@@ -243,6 +272,9 @@ def _extend_to_turnaround(
     if best_node is None:
         return None
 
+    if deadline.expired():
+        return None
+
     return reuse_penalized_path(graph, last_node, best_node, used_pairs)
 
 
@@ -258,6 +290,7 @@ def plan_constrained_out_and_back(
     count: int,
     requirements: list[FacilityRequirement],
     facilities: list[Facility],
+    deadline: PlanningDeadline | None = None,
 ) -> list[GeneratedRoute]:
     """Constrained out-and-back planner: threads a variable-length list of
     typed facility requirements onto an out-and-back's outbound corridor.
@@ -266,11 +299,19 @@ def plan_constrained_out_and_back(
     there are no requirements to place (a no-facility request must never
     invoke this planner's search machinery). See module docstring for the
     bounded-search algorithm.
-    """
+
+    `deadline` is a cooperative, shared-across-planners wall-clock
+    budget (see `app/facilities/planning_deadline.py`) checked before
+    each expensive real graph build; if unset, a fresh default-budget
+    deadline is used so this planner remains safely callable on its own
+    (e.g. from tests)."""
     if shape not in ("out_and_back", "mix"):
         return []
     if not requirements:
         return []
+
+    if deadline is None:
+        deadline = PlanningDeadline()
 
     snapped = snap_facilities(graph, facilities)
     if not snapped:
@@ -298,9 +339,10 @@ def plan_constrained_out_and_back(
     results: list[GeneratedRoute] = []
     seen_geometries: set[tuple[tuple[float, float], ...]] = set()
     full_builds_attempted = 0
+    build_budget = _adaptive_build_budget(len(requirements))
 
     for corridor_node, _corridor_dist in corridor_turnarounds:
-        if full_builds_attempted >= MAX_FULL_BUILDS_PER_CALL:
+        if full_builds_attempted >= build_budget or deadline.expired():
             break
 
         corridor_bearing = bearing_deg(start_coord, node_coordinate(graph, corridor_node))
@@ -313,13 +355,13 @@ def plan_constrained_out_and_back(
             continue
 
         for _cost, waypoint_nodes in beam_plans[:PLANS_PER_CORRIDOR]:
-            if full_builds_attempted >= MAX_FULL_BUILDS_PER_CALL:
+            if full_builds_attempted >= build_budget or deadline.expired():
                 break
             full_builds_attempted += 1
 
             route = _build_plan(
                 graph, start_node, list(waypoint_nodes), paths, target_distance_m,
-                start_coord, corridor_bearing,
+                start_coord, corridor_bearing, deadline,
             )
             if route is None:
                 continue
@@ -342,10 +384,21 @@ def _build_plan(
     target_distance_m: float,
     start_coord: Coordinate,
     corridor_bearing: float,
+    deadline: PlanningDeadline,
 ) -> GeneratedRoute | None:
     """Real build for one ordered waypoint sequence: start -> waypoints in
-    order -> (optional) turnaround extension -> mirrored return leg."""
+    order -> (optional) turnaround extension -> mirrored return leg.
+
+    `deadline` is checked before each waypoint-to-waypoint
+    `reuse_penalized_path` call and again before the extension step
+    (`_extend_to_turnaround` re-checks it internally too). An expired
+    budget mid-build returns `None` -- this function never returns a
+    partial/incomplete route; the caller simply discards it and keeps
+    whatever earlier candidates it already built."""
     if not waypoint_nodes:
+        return None
+
+    if deadline.expired():
         return None
 
     try:
@@ -357,6 +410,8 @@ def _build_plan(
     used = edge_pairs(outbound_full_path)
 
     for waypoint in waypoint_nodes[1:]:
+        if deadline.expired():
+            return None
         leg = reuse_penalized_path(graph, outbound_full_path[-1], waypoint, used)
         if leg is None:
             return None
@@ -374,6 +429,7 @@ def _build_plan(
         start_coord,
         corridor_bearing,
         used,
+        deadline,
     )
     if extension is not None and len(extension) > 1:
         outbound_full_path += extension[1:]

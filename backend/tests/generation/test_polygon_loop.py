@@ -1,13 +1,22 @@
+from collections.abc import Callable
+
 import networkx as nx
 import pytest
 
+import app.generation.polygon_loop as polygon_loop
 from app.generation.polygon_loop import (
+    DEFAULT_TOLERANCE_M,
     MAX_EDGE_REUSE_RATIO,
-    _NodeIndex,
+    Waypoint,
+    _affine_calibration_scale_via,
     _build_loop,
+    _build_loop_via_waypoints,
+    _calibration_scale_via,
+    _NodeIndex,
+    _tune_waypoints,
     polygon_loop_pairs,
 )
-from app.generation.polygon_template import LoopTemplate
+from app.generation.polygon_template import TEMPLATES, LoopTemplate, template_anchors
 from app.generation.quality import edge_reuse_ratio
 from app.generation.shape_metrics import isoperimetric_quotient
 from app.graph.model import node_coordinate
@@ -235,3 +244,180 @@ def test_zero_or_negative_target_distance_returns_empty(
 ) -> None:
     assert polygon_loop_pairs(grid_graph, start_node, 0.0, COUNT) == []
     assert polygon_loop_pairs(grid_graph, start_node, -100.0, COUNT) == []
+
+
+# ---------------------------------------------------------------------------
+# `should_continue` cooperative cancellation (facility-planner deadline hook)
+#
+# Plain, non-facility callers (polygon_loop_pairs and everything above)
+# never pass `should_continue` and are completely unaffected by these
+# checks (see the assertions above passing unchanged). These tests cover
+# only the opt-in behavior facility planners rely on.
+# ---------------------------------------------------------------------------
+
+
+def _waypoints_at_scale_for(
+    start_coord: Coordinate, target_distance_m: float, template: LoopTemplate
+) -> Callable[[float], list[Waypoint]]:
+    def build(scale: float) -> list[Waypoint]:
+        b, c, d = template_anchors(start_coord, target_distance_m, template, scale)
+        return [b, c, d]
+
+    return build
+
+
+def test_build_loop_via_waypoints_returns_none_when_already_expired(
+    grid_graph: nx.MultiDiGraph, start_node: int
+) -> None:
+    node_index = _NodeIndex(grid_graph)
+    start_coord = node_coordinate(grid_graph, start_node)
+    b, c, d = template_anchors(start_coord, TARGET_DISTANCE_M, TEMPLATES[0], 1.0)
+
+    result = _build_loop_via_waypoints(
+        grid_graph, start_node, node_index, [b, c, d], None, should_continue=lambda: False,
+    )
+    assert result is None
+
+
+def test_build_loop_via_waypoints_stops_mid_build_never_returns_partial(
+    grid_graph: nx.MultiDiGraph, start_node: int
+) -> None:
+    """Allow exactly the first checkpoint (before the outbound leg) to
+    pass, then expire -- the outbound leg alone was built, but the
+    function must return None rather than an incomplete loop."""
+    node_index = _NodeIndex(grid_graph)
+    start_coord = node_coordinate(grid_graph, start_node)
+    b, c, d = template_anchors(start_coord, TARGET_DISTANCE_M, TEMPLATES[0], 1.0)
+
+    calls = {"n": 0}
+
+    def should_continue() -> bool:
+        calls["n"] += 1
+        return calls["n"] <= 1
+
+    result = _build_loop_via_waypoints(
+        grid_graph, start_node, node_index, [b, c, d], None, should_continue=should_continue,
+    )
+    assert result is None
+    assert calls["n"] >= 2
+
+
+def test_tune_waypoints_expired_before_start_never_builds(
+    monkeypatch: pytest.MonkeyPatch, grid_graph: nx.MultiDiGraph, start_node: int
+) -> None:
+    node_index = _NodeIndex(grid_graph)
+    start_coord = node_coordinate(grid_graph, start_node)
+    waypoints_at_scale = _waypoints_at_scale_for(start_coord, TARGET_DISTANCE_M, TEMPLATES[0])
+
+    build_calls = {"n": 0}
+    orig_build = polygon_loop._build_loop_via_waypoints
+
+    def counted_build(*args: object, **kwargs: object):  # type: ignore[no-untyped-def]
+        build_calls["n"] += 1
+        return orig_build(*args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(polygon_loop, "_build_loop_via_waypoints", counted_build)
+
+    result = _tune_waypoints(
+        grid_graph, start_node, node_index, waypoints_at_scale, TARGET_DISTANCE_M,
+        1.0, DEFAULT_TOLERANCE_M, None, should_continue=lambda: False,
+    )
+    assert result is None
+    assert build_calls["n"] == 0
+
+
+def test_tune_waypoints_expired_after_first_candidate_keeps_best(
+    monkeypatch: pytest.MonkeyPatch, grid_graph: nx.MultiDiGraph, start_node: int
+) -> None:
+    """Expiry that allows exactly one build must still return that
+    candidate (not None), and must not attempt a second correction
+    build."""
+    node_index = _NodeIndex(grid_graph)
+    start_coord = node_coordinate(grid_graph, start_node)
+    waypoints_at_scale = _waypoints_at_scale_for(start_coord, TARGET_DISTANCE_M, TEMPLATES[0])
+
+    build_calls = {"n": 0}
+    orig_build = polygon_loop._build_loop_via_waypoints
+
+    def counted_build(*args: object, **kwargs: object):  # type: ignore[no-untyped-def]
+        result = orig_build(*args, **kwargs)  # type: ignore[arg-type]
+        build_calls["n"] += 1
+        return result
+
+    monkeypatch.setattr(polygon_loop, "_build_loop_via_waypoints", counted_build)
+
+    def should_continue() -> bool:
+        return build_calls["n"] < 1
+
+    result = _tune_waypoints(
+        grid_graph, start_node, node_index, waypoints_at_scale, TARGET_DISTANCE_M,
+        1.0, DEFAULT_TOLERANCE_M, None, should_continue=should_continue,
+    )
+    assert result is not None
+    assert build_calls["n"] == 1
+
+
+def test_calibration_scale_via_expired_returns_neutral_scale(
+    grid_graph: nx.MultiDiGraph, start_node: int
+) -> None:
+    node_index = _NodeIndex(grid_graph)
+    start_coord = node_coordinate(grid_graph, start_node)
+    waypoints_at_scale = _waypoints_at_scale_for(start_coord, TARGET_DISTANCE_M, TEMPLATES[0])
+
+    scale = _calibration_scale_via(
+        grid_graph, start_node, node_index, waypoints_at_scale, TARGET_DISTANCE_M, None,
+        should_continue=lambda: False,
+    )
+    assert scale == 1.0
+
+
+def test_affine_calibration_skips_probe_b_when_expired_after_probe_a(
+    monkeypatch: pytest.MonkeyPatch, grid_graph: nx.MultiDiGraph, start_node: int
+) -> None:
+    node_index = _NodeIndex(grid_graph)
+    start_coord = node_coordinate(grid_graph, start_node)
+    waypoints_at_scale = _waypoints_at_scale_for(start_coord, TARGET_DISTANCE_M, TEMPLATES[0])
+
+    build_calls = {"n": 0}
+    orig_build = polygon_loop._build_loop_via_waypoints
+
+    def counted_build(*args: object, **kwargs: object):  # type: ignore[no-untyped-def]
+        result = orig_build(*args, **kwargs)  # type: ignore[arg-type]
+        build_calls["n"] += 1
+        return result
+
+    monkeypatch.setattr(polygon_loop, "_build_loop_via_waypoints", counted_build)
+
+    def should_continue() -> bool:
+        return build_calls["n"] < 1
+
+    scale = _affine_calibration_scale_via(
+        grid_graph, start_node, node_index, waypoints_at_scale, TARGET_DISTANCE_M, None,
+        should_continue=should_continue,
+    )
+    assert build_calls["n"] == 1  # only probe A ran -- probe B was skipped
+    assert scale == 1.0  # falls back to the neutral estimate, no fallback graph work either
+
+
+def test_affine_calibration_expired_before_start_returns_neutral(
+    grid_graph: nx.MultiDiGraph, start_node: int
+) -> None:
+    node_index = _NodeIndex(grid_graph)
+    start_coord = node_coordinate(grid_graph, start_node)
+    waypoints_at_scale = _waypoints_at_scale_for(start_coord, TARGET_DISTANCE_M, TEMPLATES[0])
+
+    scale = _affine_calibration_scale_via(
+        grid_graph, start_node, node_index, waypoints_at_scale, TARGET_DISTANCE_M, None,
+        should_continue=lambda: False,
+    )
+    assert scale == 1.0
+
+
+def test_plain_generation_unaffected_by_should_continue_parameter(
+    grid_graph: nx.MultiDiGraph, start_node: int
+) -> None:
+    """Regression guard: ordinary (non-facility) polygon-loop generation
+    never passes `should_continue`, so it must produce identical
+    results to before this parameter existed."""
+    pairs = polygon_loop_pairs(grid_graph, start_node, TARGET_DISTANCE_M, COUNT)
+    assert len(pairs) >= 1

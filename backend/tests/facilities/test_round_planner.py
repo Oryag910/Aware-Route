@@ -3,8 +3,14 @@ from unittest.mock import patch
 import networkx as nx
 import pytest
 
+import app.facilities.round_planner as round_planner_module
 from app.facilities.models import Facility, FacilityRequirement
-from app.facilities.round_planner import FULL_BUILD_BUDGET, plan_constrained_round
+from app.facilities.planning_deadline import PlanningDeadline
+from app.facilities.round_planner import (
+    FULL_BUILD_BUDGET,
+    _adaptive_build_budget,
+    plan_constrained_round,
+)
 from app.facilities.encounters import find_facility_encounters
 from app.facilities.assignment import assign_requirements
 from app.generation.polygon_loop import MAX_EDGE_REUSE_RATIO
@@ -289,3 +295,111 @@ def test_deterministic(grid_graph: nx.MultiDiGraph, start: Coordinate) -> None:
     first_paths = [r.node_path for r in first]
     second_paths = [r.node_path for r in second]
     assert first_paths == second_paths
+
+
+# --- Requirement-adaptive build budget & cooperative deadline -----------
+
+
+def test_adaptive_build_budget_by_requirement_count() -> None:
+    assert _adaptive_build_budget(1) == FULL_BUILD_BUDGET
+    assert _adaptive_build_budget(2) == 4
+    assert _adaptive_build_budget(3) == 3
+    assert _adaptive_build_budget(6) == 3
+
+
+def test_already_expired_deadline_returns_no_candidates(
+    grid_graph: nx.MultiDiGraph, start: Coordinate
+) -> None:
+    """An already-expired deadline must stop the planner before any real
+    graph build -- it never raises, just returns whatever (nothing) was
+    built so far."""
+    restroom = _facility(*RESTROOM_A, "restroom", "restroom:a")
+    reqs = [_requirement("r1", "restroom")]
+
+    routes = plan_constrained_round(
+        grid_graph, start, TARGET_DISTANCE_M, "round", COUNT, reqs, [restroom],
+        deadline=PlanningDeadline(budget_s=-1.0),
+    )
+    assert routes == []
+
+
+def test_deadline_expiring_mid_search_keeps_partial_candidates(
+    grid_graph: nx.MultiDiGraph, start: Coordinate, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """If the deadline expires right after one useful build completes,
+    that candidate must still be returned rather than discarded. Ties
+    expiry to a successful build (not a raw call count) so the test
+    doesn't depend on how many build attempts internally fail first."""
+    import app.facilities.round_planner as round_planner_module
+
+    build_count = {"n": 0}
+    orig_build_plan = round_planner_module._build_plan
+
+    def counted_build_plan(*args: object, **kwargs: object):  # type: ignore[no-untyped-def]
+        result = orig_build_plan(*args, **kwargs)  # type: ignore[arg-type]
+        if result is not None:
+            build_count["n"] += 1
+        return result
+
+    monkeypatch.setattr(round_planner_module, "_build_plan", counted_build_plan)
+
+    class _ExpireAfterOneBuild(PlanningDeadline):
+        def __init__(self) -> None:
+            super().__init__(budget_s=9999.0)
+
+        def expired(self) -> bool:
+            return build_count["n"] >= 1
+
+    restroom = _facility(*RESTROOM_A, "restroom", "restroom:a")
+    water = _facility(*WATER_A, "water", "water:a")
+    reqs = [_requirement("r1", "restroom"), _requirement("w1", "water")]
+
+    routes = plan_constrained_round(
+        grid_graph, start, TARGET_DISTANCE_M, "round", COUNT, reqs, [restroom, water],
+        deadline=_ExpireAfterOneBuild(),
+    )
+    assert len(routes) == 1
+
+
+def test_build_plan_shares_one_deadline_with_calibration_and_tuning(
+    grid_graph: nx.MultiDiGraph, start: Coordinate
+) -> None:
+    """The SAME deadline object given to `plan_constrained_round` must be
+    the one `_affine_calibration_scale_via` and `_tune_waypoints`
+    cooperatively check -- not an independent, freshly-created deadline
+    inside `_build_plan`."""
+    captured: dict[str, object] = {}
+    orig_affine = round_planner_module._affine_calibration_scale_via  # type: ignore[attr-defined]
+    orig_tune = round_planner_module._tune_waypoints  # type: ignore[attr-defined]
+
+    def spy_affine(*args: object, **kwargs: object):  # type: ignore[no-untyped-def]
+        captured["affine_should_continue"] = kwargs.get("should_continue")
+        return orig_affine(*args, **kwargs)  # type: ignore[arg-type]
+
+    def spy_tune(*args: object, **kwargs: object):  # type: ignore[no-untyped-def]
+        captured["tune_should_continue"] = kwargs.get("should_continue")
+        return orig_tune(*args, **kwargs)  # type: ignore[arg-type]
+
+    restroom = _facility(*RESTROOM_A, "restroom", "restroom:a")
+    reqs = [_requirement("r1", "restroom")]
+    deadline = PlanningDeadline(budget_s=9999.0)
+
+    with (
+        patch.object(round_planner_module, "_affine_calibration_scale_via", spy_affine),
+        patch.object(round_planner_module, "_tune_waypoints", spy_tune),
+    ):
+        routes = plan_constrained_round(
+            grid_graph, start, TARGET_DISTANCE_M, "round", COUNT, reqs, [restroom],
+            deadline=deadline,
+        )
+
+    assert routes
+    assert captured["affine_should_continue"] is not None
+    assert captured["tune_should_continue"] is not None
+    # Both callbacks must reflect the SAME underlying deadline object --
+    # marking it expired makes both report "stop" simultaneously.
+    assert captured["affine_should_continue"]() is True  # type: ignore[operator]
+    assert captured["tune_should_continue"]() is True  # type: ignore[operator]
+    deadline.budget_s = -1.0
+    assert captured["affine_should_continue"]() is False  # type: ignore[operator]
+    assert captured["tune_should_continue"]() is False  # type: ignore[operator]

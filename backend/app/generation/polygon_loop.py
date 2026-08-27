@@ -123,6 +123,7 @@ def _build_loop_via_waypoints(
     node_index: _NodeIndex,
     waypoints: list[Waypoint],
     paths: dict[int, list[int]] | None,
+    should_continue: Callable[[], bool] | None = None,
 ) -> tuple[RouteCandidate, list[int]] | None:
     """Stitch start -> waypoints[0] -> waypoints[1] -> ... -> start.
 
@@ -138,6 +139,18 @@ def _build_loop_via_waypoints(
     so later legs avoid retracing earlier ones (reuse-penalized
     routing), exactly like V1's turnaround-and-return but applied
     across every leg of the loop instead of just one.
+
+    `should_continue` is an optional cooperative-cancellation callback
+    (deliberately not a facilities-specific `PlanningDeadline` type --
+    this module has no business knowing what a planning deadline is;
+    callers with a time budget pass `lambda: not deadline.expired()`).
+    Checked before each expensive graph-routing leg -- the only
+    operations this function can't cheaply undo -- so a caller that
+    stops asking for more work never gets back an INCOMPLETE route:
+    any expiry here returns None, same as an unreachable leg. Plain,
+    non-facility callers never pass this, so behavior is unchanged for
+    them (the check is skipped entirely when `should_continue is
+    None`).
     """
     nodes = [start_node]
     for waypoint in waypoints:
@@ -147,6 +160,9 @@ def _build_loop_via_waypoints(
         nodes.append(node)
     nodes.append(start_node)
 
+    if should_continue is not None and not should_continue():
+        return None
+
     try:
         first_leg = outbound_path(graph, start_node, nodes[1], paths)
     except RouteNotFoundError:
@@ -155,6 +171,8 @@ def _build_loop_via_waypoints(
     used = edge_pairs(first_leg)
 
     for i in range(1, len(nodes) - 1):
+        if should_continue is not None and not should_continue():
+            return None
         leg = reuse_penalized_path(graph, nodes[i], nodes[i + 1], used)
         if leg is None:
             return None
@@ -230,6 +248,7 @@ def _tune_waypoints(
     max_scale: float = MAX_SCALE,
     max_correction_attempts: int = MAX_CORRECTION_ATTEMPTS,
     use_secant_refinement: bool = False,
+    should_continue: Callable[[], bool] | None = None,
 ) -> tuple[RouteCandidate, list[int]] | None:
     """Bounded iterative distance tuning shared by the plain and
     amenity-aware generators.
@@ -264,6 +283,12 @@ def _tune_waypoints(
     `polygon_amenity.py` opts in; the plain (no-amenity) path has no
     fixed component, so proportional correction already works well
     there and this stays off to avoid changing its validated behavior.
+
+    `should_continue` (see `_build_loop_via_waypoints`) is checked
+    before every rebuild attempt, including the first -- an expired
+    budget means no correction attempt starts, and `best` (whatever was
+    already built, `None` if nothing was) is returned as-is rather than
+    attempting one more rebuild.
     """
     scale = initial_scale
     best: tuple[RouteCandidate, list[int]] | None = None
@@ -271,8 +296,10 @@ def _tune_waypoints(
     history: list[tuple[float, float]] = []
 
     for _ in range(1 + max_correction_attempts):
+        if should_continue is not None and not should_continue():
+            break
         result = _build_loop_via_waypoints(
-            graph, start_node, node_index, waypoints_at_scale(scale), paths
+            graph, start_node, node_index, waypoints_at_scale(scale), paths, should_continue,
         )
         if result is None:
             break  # can't build at this scale -- don't force it
@@ -330,6 +357,7 @@ def _calibration_scale_via(
     paths: dict[int, list[int]] | None,
     min_scale: float = MIN_SCALE,
     max_scale: float = MAX_SCALE,
+    should_continue: Callable[[], bool] | None = None,
 ) -> float:
     """Probe-build `waypoints_at_scale(1.0)` to estimate how much the
     graph inflates a synthetic perimeter into an actual routed
@@ -340,9 +368,15 @@ def _calibration_scale_via(
     calibration) if the probe waypoints can't be built at all -- the
     caller's own `_tune_waypoints` correction loop then calibrates
     independently. `min_scale`/`max_scale` mirror `_tune_waypoints`'s
-    overridable bounds."""
+    overridable bounds.
+
+    `should_continue` (see `_build_loop_via_waypoints`) is checked
+    before the probe build -- an expired budget returns the neutral
+    1.0 fallback without starting any graph work at all."""
+    if should_continue is not None and not should_continue():
+        return 1.0
     probe = _build_loop_via_waypoints(
-        graph, start_node, node_index, waypoints_at_scale(1.0), paths
+        graph, start_node, node_index, waypoints_at_scale(1.0), paths, should_continue,
     )
     if probe is None or probe[0].distance_m <= 0:
         return 1.0
@@ -359,6 +393,7 @@ def _affine_calibration_scale_via(
     min_scale: float = MIN_SCALE,
     max_scale: float = MAX_SCALE,
     probe_scales: tuple[float, float] = (0.3, 1.0),
+    should_continue: Callable[[], bool] | None = None,
 ) -> float:
     """Two-probe affine estimate of the scale that should hit target.
 
@@ -380,18 +415,33 @@ def _affine_calibration_scale_via(
     `_calibration_scale_via`'s single-probe estimate if either probe
     fails to build or the fit is degenerate (non-positive slope, or
     equal probe scales).
+
+    `should_continue` (see `_build_loop_via_waypoints`) is checked
+    before probe A, again before probe B, and again before falling
+    back to `_calibration_scale_via` -- an expired budget at any of
+    these points returns the neutral 1.0 fallback immediately rather
+    than starting another probe build.
     """
+    if should_continue is not None and not should_continue():
+        return 1.0
+
     scale_a, scale_b = probe_scales
     probe_a = _build_loop_via_waypoints(
-        graph, start_node, node_index, waypoints_at_scale(scale_a), paths
+        graph, start_node, node_index, waypoints_at_scale(scale_a), paths, should_continue,
     )
+
+    if should_continue is not None and not should_continue():
+        return 1.0
+
     probe_b = _build_loop_via_waypoints(
-        graph, start_node, node_index, waypoints_at_scale(scale_b), paths
+        graph, start_node, node_index, waypoints_at_scale(scale_b), paths, should_continue,
     )
     if probe_a is None or probe_b is None or scale_a == scale_b:
+        if should_continue is not None and not should_continue():
+            return 1.0
         return _calibration_scale_via(
             graph, start_node, node_index, waypoints_at_scale, target_distance_m,
-            paths, min_scale, max_scale,
+            paths, min_scale, max_scale, should_continue,
         )
 
     distance_a, distance_b = probe_a[0].distance_m, probe_b[0].distance_m

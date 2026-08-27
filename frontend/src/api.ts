@@ -93,6 +93,17 @@ export class NetworkError extends Error {
   }
 }
 
+// Thrown when the request is aborted for taking longer than
+// `ROUTE_REQUEST_TIMEOUT_MS` -- distinct from `NetworkError` so the UI can
+// show dedicated "this is taking too long" copy instead of an offline
+// message, since the backend may well still be reachable and working.
+export class TimeoutError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "TimeoutError";
+  }
+}
+
 // FastAPI's automatic validation-error shape: `detail` is a list of these.
 // The app's own deliberate HTTPExceptions always send a plain string detail.
 type ValidationErrorItem = { msg?: unknown };
@@ -143,6 +154,15 @@ function apiUrl(path: string): string {
 
 const METERS_PER_MILE = 1609.34;
 
+// Backend constrained planning targets a ~25s cooperative wall-clock budget
+// (see `ROUTE_PLANNING_BUDGET_S` server-side) -- checked before each
+// expensive graph-routing step, not a hard preemptive cutoff, so actual
+// worst-case backend time can exceed 25s by roughly one already-running
+// graph operation. This value is a client-side UX fail-safe with margin
+// for that, plus network latency, response serialization, and proxy
+// overhead -- it does not cancel or otherwise affect backend work.
+export const ROUTE_REQUEST_TIMEOUT_MS = 35_000;
+
 export async function fetchRoutes(
   startPosition: [number, number],
   values: RouteFormValues,
@@ -179,6 +199,12 @@ export async function fetchRoutes(
 
   let response: Response;
 
+  const controller = new AbortController();
+  const timeoutId = setTimeout(
+    () => controller.abort(),
+    ROUTE_REQUEST_TIMEOUT_MS,
+  );
+
   try {
     response = await fetch(apiUrl("/routes"), {
       method: "POST",
@@ -186,13 +212,19 @@ export async function fetchRoutes(
         "Content-Type": "application/json",
       },
       body: JSON.stringify(body),
+      signal: controller.signal,
     });
-  } catch {
+  } catch (err) {
+    if (err instanceof DOMException && err.name === "AbortError") {
+      throw new TimeoutError("This route is taking too long to calculate.");
+    }
     // fetch() rejects (rather than resolving with a non-ok response) when
     // the request never reached a server at all.
     throw new NetworkError(
       "Couldn't reach the route service. Check your connection and try again.",
     );
+  } finally {
+    clearTimeout(timeoutId);
   }
 
   if (!response.ok) {

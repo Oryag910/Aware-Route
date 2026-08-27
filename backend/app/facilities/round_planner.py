@@ -50,6 +50,7 @@ from app.routing.geometry import haversine_m
 from app.routing.provider import Coordinate, RouteCandidate
 
 from app.facilities.models import Facility, FacilityRequirement, SnappedFacility
+from app.facilities.planning_deadline import PlanningDeadline
 from app.facilities.snapping import snap_facilities
 
 
@@ -79,6 +80,27 @@ FULL_BUILD_BUDGET = 6
 # module's AMENITY_MIN_SCALE=0.1.
 ROUND_PLANNER_MIN_SCALE = 0.05
 ROUND_PLANNER_MAX_CORRECTION_ATTEMPTS = 6
+
+
+def _adaptive_build_budget(requirement_count: int) -> int:
+    """How many of `FULL_BUILD_BUDGET`'s expensive real-graph builds this
+    call gets, based on requirement count.
+
+    The Aug 25 facility stress benchmark (docs/benchmarks.md) shows a
+    single genuinely-hard requirement is reliably solved at the full
+    budget (18/18 fully valid), but 2+ simultaneous hard requirements
+    already succeed in only 0-2.8% of stress cases even when the planner
+    runs to its full budget -- the extra builds buy latency there, not a
+    meaningfully better success rate. Preserve the proven single-
+    requirement budget in full and shrink it for the harder, already-
+    unreliable cases so worst-case latency doesn't scale with a search
+    that has sharply diminishing returns.
+    """
+    if requirement_count <= 1:
+        return FULL_BUILD_BUDGET
+    if requirement_count == 2:
+        return 4
+    return 3
 
 
 def _leg_fractions(template: LoopTemplate) -> dict[LegName, tuple[float, float]]:
@@ -242,13 +264,22 @@ def _build_plan(
     ordered: list[_PlacedRequirement],
     plan: _Plan,
     paths: dict[int, list[int]] | None,
+    deadline: PlanningDeadline,
 ) -> tuple[RouteCandidate, list[int]] | None:
+    # A single `should_continue` closure over the SAME request-wide
+    # deadline object is threaded into every expensive step below --
+    # `polygon_loop.py` has no facilities-specific `PlanningDeadline`
+    # type of its own, just this neutral callback (see
+    # `_build_loop_via_waypoints`'s docstring).
+    should_continue = lambda: not deadline.expired()  # noqa: E731
+
     waypoints_at_scale = _waypoints_at_scale(
         start_coord, target_distance_m, template, ordered, plan.node_ids
     )
     calibration = _affine_calibration_scale_via(
         graph, start_node, node_index, waypoints_at_scale, target_distance_m, paths,
         min_scale=ROUND_PLANNER_MIN_SCALE,
+        should_continue=should_continue,
     )
     result = _tune_waypoints(
         graph, start_node, node_index, waypoints_at_scale, target_distance_m,
@@ -256,6 +287,7 @@ def _build_plan(
         min_scale=ROUND_PLANNER_MIN_SCALE,
         max_correction_attempts=ROUND_PLANNER_MAX_CORRECTION_ATTEMPTS,
         use_secant_refinement=True,
+        should_continue=should_continue,
     )
     if result is None:
         return None
@@ -275,14 +307,24 @@ def plan_constrained_round(
     count: int,
     requirements: list[FacilityRequirement],
     facilities: list[Facility],
+    deadline: PlanningDeadline | None = None,
 ) -> list[GeneratedRoute]:
     """Bounded multi-facility Polygon round planner. Returns `[]`
     immediately for shapes that could never use a round candidate, or
     when there's nothing to place -- this planner's search machinery
     must never run for an ordinary no-facility/out-and-back-only
-    request."""
+    request.
+
+    `deadline` is a cooperative, shared-across-planners wall-clock
+    budget (see `app/facilities/planning_deadline.py`) checked before
+    each expensive real graph build; if unset, a fresh default-budget
+    deadline is used so this planner remains safely callable on its own
+    (e.g. from tests)."""
     if shape not in ("round", "mix") or not requirements or target_distance_m <= 0:
         return []
+
+    if deadline is None:
+        deadline = PlanningDeadline()
 
     snapped = snap_facilities(graph, facilities)
     if not snapped:
@@ -325,15 +367,16 @@ def plan_constrained_round(
     routes: list[GeneratedRoute] = []
     seen_geometry: set[tuple[tuple[float, float], ...]] = set()
     builds = 0
+    build_budget = _adaptive_build_budget(len(requirements))
 
     for _cost, template, ordered, plan in ranked_plans:
-        if builds >= FULL_BUILD_BUDGET:
+        if builds >= build_budget or deadline.expired():
             break
         builds += 1
 
         built = _build_plan(
             graph, start_node, node_index, start_coord, target_distance_m,
-            template, ordered, plan, paths,
+            template, ordered, plan, paths, deadline,
         )
         if built is None:
             continue
