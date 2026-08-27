@@ -33,7 +33,7 @@ A single-process, in-memory rate limiter protects the public demo: 10 requests p
 
 ## PR preview architecture
 
-Render is configured for automatic PR service previews (`render.yaml`: `previews.generation: automatic`), so every open PR gets its own short-lived backend instance at its own Render URL. A GitHub Actions workflow, `.github/workflows/pr-preview-sync.yml`, wires that preview backend to the matching Vercel preview frontend:
+Render is configured to generate PR service previews automatically (`render.yaml`: `previews.generation: automatic`), giving each open PR its own backend instance at its own Render URL. A GitHub Actions workflow, `.github/workflows/pr-preview-sync.yml`, wires that preview backend to the matching Vercel preview frontend:
 
 1. Triggered by a `deployment_status` event (fired when Render posts a deployment status for a PR's service preview).
 2. Resolves which open PR that deployment belongs to, by matching the deployment's commit SHA against open PRs' head commits.

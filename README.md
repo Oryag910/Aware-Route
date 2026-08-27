@@ -46,7 +46,7 @@ graph LR
 
 The backend ships with deterministic benchmark suites, re-run against the current code and committed here.
 
-**Core engine** — 537 scenarios (round / out-and-back / mixed, no facility requirements):
+**Core engine** — 537 deterministic round / out-and-back / mixed scenarios, including bundled-fountain amenity cases:
 
 | Metric | Result |
 |---|---|
