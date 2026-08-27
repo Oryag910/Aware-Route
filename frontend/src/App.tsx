@@ -394,7 +394,7 @@ function App() {
         <div className="flex items-center gap-2">
           <AwareMark className="h-7 w-7" />
           <h1 className="font-display text-2xl font-semibold text-ink">
-            Aware
+            Aware Route
           </h1>
         </div>
         <p className="mt-0.5 hidden text-sm text-ink-muted sm:block">

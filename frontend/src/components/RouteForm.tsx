@@ -264,7 +264,7 @@ export default function RouteForm({
                 type="button"
                 onClick={() => handleRemoveRequirement(requirement.id)}
                 aria-label={`Remove ${kindLabel} stop ${index + 1}`}
-                className="inline-flex h-[38px] w-[38px] items-center justify-center rounded-lg border border-border text-ink-muted transition-colors hover:border-danger/50 hover:text-danger focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/40"
+                className="inline-flex h-11 w-11 items-center justify-center rounded-lg border border-border text-ink-muted transition-colors hover:border-danger/50 hover:text-danger focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/40"
               >
                 <X className="h-4 w-4" />
               </button>
