@@ -31,6 +31,7 @@ from app.facilities.scoring import (
     rank_key,
     score_facility_requirements,
 )
+from app.facilities.spatial_index import FacilitySpatialIndex
 from app.generation.engine import generate_routes
 from app.generation.routes import GeneratedRoute
 from app.routing.provider import Coordinate
@@ -104,12 +105,23 @@ def score_candidates(
     target_distance_m: float,
     requirements: list[FacilityRequirement],
     facilities: list[Facility],
+    facility_index: FacilitySpatialIndex | None = None,
+    timing: dict[str, float] | None = None,
 ) -> list[ScoredRoute]:
+    """`facility_index` lets a caller scoring the same `facilities` list
+    across many candidates/rescoring passes (see `plan_routes`) build the
+    spatial index once and reuse it, instead of rebuilding it on every
+    call -- if omitted, a private index is built for this call only.
+    `timing`, if given, is passed through to `score_facility_requirements`
+    to accumulate encounter/assignment timing across every route scored."""
+    index = facility_index if facility_index is not None else FacilitySpatialIndex(facilities)
     scored: list[ScoredRoute] = []
     for route in routes:
         geometry = route.candidate.geometry
         distance_error = abs(route.candidate.distance_m - target_distance_m)
-        facility_score = score_facility_requirements(geometry, requirements, facilities)
+        facility_score = score_facility_requirements(
+            geometry, requirements, facilities, facility_index=index, timing=timing
+        )
         quality = _quality_score(route)
         scored.append(
             ScoredRoute(
@@ -321,18 +333,31 @@ def plan_routes(
     deadline = PlanningDeadline()
     total_start = time.perf_counter()
 
+    # Built once and reused for every scoring pass below (natural, and
+    # every progressive-planner rescore) -- the facility catalog never
+    # changes mid-request, so there's no reason to rebuild the spatial
+    # index per candidate or per rescore (see FacilitySpatialIndex).
+    facility_index = FacilitySpatialIndex(facilities)
+    # Accumulates encounter-finding/assignment time across every
+    # scoring pass sharing this one dict -- see score_facility_requirements.
+    scoring_timing: dict[str, float] = {}
+
     pool = natural_match_pool(graph, start, target_distance_m, shape, count, requirements)
     natural_generation_s = time.perf_counter() - total_start
+    natural_candidates = len(pool)
+    natural_segments = sum(max(0, len(r.candidate.geometry) - 1) for r in pool)
 
     score_start = time.perf_counter()
-    scored = score_candidates(pool, target_distance_m, requirements, facilities)
+    scored = score_candidates(
+        pool, target_distance_m, requirements, facilities,
+        facility_index=facility_index, timing=scoring_timing,
+    )
     natural_scoring_s = time.perf_counter() - score_start
 
     fully_valid_natural = sum(1 for s in scored if s.fully_valid)
     fully_valid_count = fully_valid_natural
 
     planner_timings: dict[str, float] = {}
-    budget_exhausted = False
 
     if constrained_planners and requirements and fully_valid_count < count:
         combined_pool = pool
@@ -357,7 +382,8 @@ def plan_routes(
             existing_keys |= {_geometry_key(r) for r in new_routes}
 
             scored = score_candidates(
-                combined_pool, target_distance_m, requirements, facilities
+                combined_pool, target_distance_m, requirements, facilities,
+                facility_index=facility_index, timing=scoring_timing,
             )
             fully_valid_count = sum(1 for s in scored if s.fully_valid)
 
@@ -366,18 +392,32 @@ def plan_routes(
                 # so the remaining planners' expensive search is skipped.
                 break
 
-        budget_exhausted = deadline.expired()
-
     total_s = time.perf_counter() - total_start
+    # Computed unconditionally regardless of whether constrained planners
+    # ran -- the deadline covers the WHOLE call (including natural
+    # generation/scoring, see above), so a slow natural phase alone can
+    # legitimately exhaust the budget even though the graph-search
+    # cooperative checks (which only gate constrained-planner work) never
+    # got a chance to observe it. This field means "was the budget spent
+    # by the time we finished," not "did search work get cut off."
+    budget_exhausted = deadline.expired()
+
     planner_timing_str = " ".join(f"{name}_s={t:.3f}" for name, t in planner_timings.items())
     logger.info(
-        "route_plan timing requirements=%d shape=%s natural_generation_s=%.3f "
-        "natural_scoring_s=%.3f %stotal_s=%.3f fully_valid_natural=%d "
+        "route_plan timing requirements=%d shape=%s facilities=%d "
+        "natural_candidates=%d natural_segments=%d natural_generation_s=%.3f "
+        "natural_scoring_s=%.3f encounter_scoring_s=%.3f assignment_s=%.3f "
+        "%stotal_s=%.3f fully_valid_natural=%d "
         "fully_valid_final=%d budget_exhausted=%s",
         len(requirements),
         shape,
+        len(facilities),
+        natural_candidates,
+        natural_segments,
         natural_generation_s,
         natural_scoring_s,
+        scoring_timing.get("encounter_s", 0.0),
+        scoring_timing.get("assignment_s", 0.0),
         planner_timing_str + " " if planner_timing_str else "",
         total_s,
         fully_valid_natural,

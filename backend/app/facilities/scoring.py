@@ -13,6 +13,7 @@ an explicit, deterministic tier order (see `rank_key`) so a prettier
 route can never mask a failed hard constraint.
 """
 
+import time
 from dataclasses import dataclass
 
 from app.facilities.assignment import assign_requirements
@@ -22,6 +23,7 @@ from app.facilities.models import (
     FacilityRequirement,
     RequirementResult,
 )
+from app.facilities.spatial_index import FacilitySpatialIndex
 from app.routing.provider import RoutePoint
 
 
@@ -40,7 +42,12 @@ def score_facility_requirements(
     geometry: tuple[RoutePoint, ...],
     requirements: list[FacilityRequirement],
     facilities: list[Facility],
+    facility_index: FacilitySpatialIndex | None = None,
+    timing: dict[str, float] | None = None,
 ) -> FacilityScore:
+    """`timing`, if given, accumulates `encounter_s`/`assignment_s` keys
+    across every call sharing the same dict (see `score_candidates`) --
+    purely additive observability, no effect on the returned score."""
     if not requirements:
         return FacilityScore(
             requirement_results=(),
@@ -49,8 +56,17 @@ def score_facility_requirements(
             all_satisfied=True,
         )
 
-    encounters = find_facility_encounters(geometry, facilities)
+    t0 = time.perf_counter()
+    encounters = find_facility_encounters(geometry, facilities, facility_index=facility_index)
+    if timing is not None:
+        t1 = time.perf_counter()
+        timing["encounter_s"] = timing.get("encounter_s", 0.0) + (t1 - t0)
+        t0 = t1
+
     results = assign_requirements(requirements, encounters)
+    if timing is not None:
+        timing["assignment_s"] = timing.get("assignment_s", 0.0) + (time.perf_counter() - t0)
+
     satisfied_count = sum(1 for r in results if r.satisfied)
 
     return FacilityScore(

@@ -22,6 +22,7 @@ from app.restrooms.geo import cumulative_distances_m
 from app.routing.provider import RoutePoint
 
 from app.facilities.models import Facility, FacilityEncounter
+from app.facilities.spatial_index import FacilitySpatialIndex
 
 
 # Same "on the route" bar the legacy restroom/amenity matchers use.
@@ -120,25 +121,11 @@ def _group_contiguous(hits: list[_SegmentHit]) -> list[list[_SegmentHit]]:
     return groups
 
 
-def find_facility_encounters(
-    geometry: tuple[RoutePoint, ...],
-    facilities: list[Facility],
-    max_distance_m: float = FACILITY_ACCESS_THRESHOLD_M,
+def _encounters_from_hits_by_facility(
+    hits_by_facility: dict[str, tuple[Facility, list[_SegmentHit]]],
 ) -> list[FacilityEncounter]:
-    """Every distinct pass of every facility along the finished route,
-    ordered by facility id then `mile_marker_m` (which also fixes each
-    facility's `encounter_index` sequence)."""
-    if len(geometry) < 2:
-        return []
-
-    route_distances = cumulative_distances_m(geometry)
     encounters: list[FacilityEncounter] = []
-
-    for facility in facilities:
-        hits = _segment_hits(geometry, route_distances, facility, max_distance_m)
-        if not hits:
-            continue
-
+    for facility, hits in hits_by_facility.values():
         for encounter_index, group in enumerate(_group_contiguous(hits)):
             best = min(group, key=lambda h: h.perpendicular_distance_m)
             encounters.append(
@@ -150,6 +137,86 @@ def find_facility_encounters(
                     route_segment_index=best.segment_index,
                 )
             )
-
     encounters.sort(key=lambda e: (e.facility.id, e.encounter_index))
     return encounters
+
+
+def _find_facility_encounters_brute_force(
+    geometry: tuple[RoutePoint, ...],
+    facilities: list[Facility],
+    max_distance_m: float = FACILITY_ACCESS_THRESHOLD_M,
+) -> list[FacilityEncounter]:
+    """Reference implementation kept ONLY for differential testing
+    against the spatial-index path below -- O(facilities x segments),
+    exactly the original (pre-index) algorithm. Not used in production
+    scoring; see `find_facility_encounters`."""
+    if len(geometry) < 2:
+        return []
+
+    route_distances = cumulative_distances_m(geometry)
+    hits_by_facility: dict[str, tuple[Facility, list[_SegmentHit]]] = {}
+
+    for facility in facilities:
+        hits = _segment_hits(geometry, route_distances, facility, max_distance_m)
+        if hits:
+            hits_by_facility[facility.id] = (facility, hits)
+
+    return _encounters_from_hits_by_facility(hits_by_facility)
+
+
+def find_facility_encounters(
+    geometry: tuple[RoutePoint, ...],
+    facilities: list[Facility],
+    max_distance_m: float = FACILITY_ACCESS_THRESHOLD_M,
+    facility_index: FacilitySpatialIndex | None = None,
+) -> list[FacilityEncounter]:
+    """Every distinct pass of every facility along the finished route,
+    ordered by facility id then `mile_marker_m` (which also fixes each
+    facility's `encounter_index` sequence).
+
+    Iterates segment-outer, facility-inner: for each route segment, a
+    `FacilitySpatialIndex` cheaply narrows the facility catalog down to
+    the (small) set that could plausibly be within `max_distance_m`,
+    and the exact, unchanged `_project_onto_segment` check runs only on
+    that narrowed set -- same answers as the brute-force O(facilities x
+    segments) scan (see `_find_facility_encounters_brute_force`, kept
+    for differential tests), just without wastefully projecting every
+    facility onto every segment regardless of distance.
+
+    `facility_index` lets a caller scoring many candidate routes against
+    the SAME facility catalog (e.g. `score_candidates`) build the index
+    once and pass it in, instead of rebuilding it on every call -- if
+    omitted, a private index is built for this call only.
+    """
+    if len(geometry) < 2:
+        return []
+
+    route_distances = cumulative_distances_m(geometry)
+    index = facility_index if facility_index is not None else FacilitySpatialIndex(facilities)
+
+    hits_by_facility: dict[str, tuple[Facility, list[_SegmentHit]]] = {}
+
+    for segment_index in range(len(geometry) - 1):
+        p0, p1 = geometry[segment_index], geometry[segment_index + 1]
+        for facility in index.candidates_near_segment(p0, p1, max_distance_m):
+            projection = _project_onto_segment(p0, p1, facility)
+            if projection.perpendicular_distance_m > max_distance_m:
+                continue
+
+            segment_length = route_distances[segment_index + 1] - route_distances[segment_index]
+            mile_marker = (
+                route_distances[segment_index]
+                + projection.fraction_along_segment * segment_length
+            )
+            hit = _SegmentHit(
+                segment_index=segment_index,
+                perpendicular_distance_m=projection.perpendicular_distance_m,
+                mile_marker_m=mile_marker,
+            )
+
+            if facility.id in hits_by_facility:
+                hits_by_facility[facility.id][1].append(hit)
+            else:
+                hits_by_facility[facility.id] = (facility, [hit])
+
+    return _encounters_from_hits_by_facility(hits_by_facility)
