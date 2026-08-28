@@ -35,41 +35,53 @@ def _round_generator_version() -> RoundGenerator:
     `through_amenities_pairs` regardless, since that legacy contract is
     out of scope for this migration.
 
-    Default has been "v1" since PR #16/#17 and STAYS "v1" here despite a
-    full re-evaluation (this migration): polygon's geometry is
-    substantially better on every measured axis (radial exposure,
-    elongation, compactness, zero tuner-generated start spurs) and,
-    after PR #25 replaced O(facilities x segments) facility-encounter
-    scoring with `FacilitySpatialIndex` (removing what used to be the
-    dominant latency cost on real multi-facility requests regardless of
-    round generator), polygon's own generation-latency picture is far
-    better than the original PR #16 opt-in gate (p95 2.27s): a targeted
-    `reuse_penalty._reuse_penalty_weight` optimization (this migration)
-    plus a within-tolerance-first ranking + bounded V1 top-up fix for a
-    real reliability regression (see `_round_pairs`) brought the full
-    537-scenario p95 down to 2.295s and count=3 round reliability up to
-    100.0% (matching/exceeding V1's 99.4%). Two measured gaps remain,
-    both reported in docs/benchmarks.md rather than papered over:
+    Default has been "v1" since PR #16/#17 and STAYS "v1" here despite
+    two rounds of re-evaluation: polygon's geometry is substantially
+    better on every measured axis (radial exposure, elongation,
+    compactness, zero tuner-generated start spurs) and, after PR #25
+    replaced O(facilities x segments) facility-encounter scoring with
+    `FacilitySpatialIndex` (removing what used to be the dominant
+    latency cost on real multi-facility requests regardless of round
+    generator), polygon's own generation-latency picture is far better
+    than the original PR #16 opt-in gate (p95 2.27s). A first migration
+    landed a `reuse_penalty._reuse_penalty_weight` optimization plus a
+    within-tolerance-first ranking + bounded V1 top-up fix for a real
+    reliability regression (see `_round_pairs`), reaching 100.0%
+    count=3 reliability. A follow-up root-caused and fixed two more
+    real mechanisms -- a scale-correction plateau wasting ~23-25% of
+    rebuild attempts in hard scenarios (see `polygon_loop.py`'s
+    `PLATEAU_DISTANCE_EPSILON_M`), and a diversity-selection bug that
+    could silently swap a passing candidate for a failing one (see
+    `facilities.orchestration._select_diverse_within_tiers`) -- after
+    exhaustively ruling out several other plausible fixes with direct
+    measurement (per-template calibration, wider correction budgets,
+    antipodal template substitution: see docs/benchmarks.md). Two
+    measured gaps remain, both reported rather than papered over:
 
-    1. Full-suite p95 latency (2.295s) is still above the project's
-       historical p95<2.0s raw-generation gate -- concentrated in a
-       small number of genuinely extreme scenarios (peninsula-tip start
-       points at large target distances) where polygon's own
-       multi-anchor search and V1's fallback turnaround search are each
-       independently expensive, so the reliability fix's fallback
-       stacks both costs on exactly those requests.
+    1. Full-suite p95 latency (2.241s, down from 2.295s) is still above
+       the project's historical p95<2.0s raw-generation gate --
+       concentrated in a small number of genuinely extreme scenarios
+       (peninsula-tip start points at large target distances) where
+       polygon's own multi-anchor search and V1's fallback turnaround
+       search are each independently expensive, so the reliability
+       fix's fallback still stacks both costs on exactly those
+       requests even with the plateau waste removed.
     2. At the API's supported count=5 (not the product default),
-       round-shape "all returned within tolerance" is only ~90.0% under
-       polygon vs V1's ~98.9% -- `MIN_WITHIN_TOLERANCE_FLOOR` targets
-       the product default (count=3, where polygon is at 100.0%), not
-       this wider stress case, so count=5 still shows a real reliability
-       gap this migration did not close.
+       round-shape "all returned within tolerance" is ~93.3% (up from
+       90.0%) under polygon vs V1's ~99.4% -- the diversity fix
+       recovered cases where enough in-tolerance candidates existed but
+       were being displaced, but cannot manufacture a candidate in
+       scenarios where fewer than 5 templates converge natively at all;
+       `MIN_WITHIN_TOLERANCE_FLOOR` targets the product default
+       (count=3, where polygon is at 100.0%), not this wider case.
 
-    Per this migration's own instructions: do not silently redefine a
-    gate or minimize a gap to ship the default anyway -- report both
-    tradeoffs and leave the switch here. Set `ROUND_GENERATOR=polygon`
-    to opt in now; flipping this default to "polygon" is a follow-up
-    once both gaps are closed or the gates are deliberately revisited.
+    Per this project's own standard: do not silently redefine a gate or
+    minimize a gap to ship the default anyway -- report both tradeoffs
+    and leave the switch here. Set `ROUND_GENERATOR=polygon` to opt in
+    now; flipping this default to "polygon" is a follow-up once both
+    gaps are closed (likely requiring a deeper change to polygon's own
+    template search, e.g. asymmetric per-leg scaling, rather than
+    another tuning pass) or the gates are deliberately revisited.
     """
     value = os.environ.get("ROUND_GENERATOR", "v1").strip().lower()
     return "polygon" if value == "polygon" else "v1"

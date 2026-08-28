@@ -109,6 +109,42 @@ The p95 gap is concentrated, not diffuse: e.g. the "Battery Park tip, huge targe
 
 **Facility benchmark (`scripts/benchmark_facilities.py`)**: unchanged from the documented baseline above -- Stratum A 117/117, Stratum B 18/18 -> 0/18 -> 0/18 -> 0/18 (2.8% partial), Stratum C 12/12 -- confirming the constrained multi-facility planner (which already used polygon's machinery directly, independent of `ROUND_GENERATOR`) and the generic facility-scoring/assignment contract are both untouched by this migration.
 
+## Polygon convergence follow-up (2026-08-28)
+
+Root-caused and fixed two real mechanisms behind the p95-latency and count=5-reliability gaps identified above, then re-measured on the same commit. **Result: `v1` still remains the default** -- both gates improved but neither closed.
+
+**Root cause 1 -- wasted latency from a scale-correction plateau.** Instrumented `polygon_loop._tune_waypoints`'s correction loop directly (not guessed): in hard scenarios (e.g. "Inwood Hill Park, 8mi"), 4-5 of the 10 templates rebuild the IDENTICAL route on every correction attempt after the first, because their rotation points toward the edge of the routable graph (a peninsula's water boundary) -- the synthetic anchor keeps moving further away as `scale` grows, but `_NodeIndex.nearest()` keeps snapping it to the same boundary-closest node no matter how far out it's requested (measured directly: scale 1.5/2.0/2.2/3.0/5.0 all snapped one anchor to the same graph node, 1461m from start, while the synthetic point moved from 4.8km to 16km away). ~23-25% of all rebuild attempts in hard scenarios were pure waste chasing a target that orientation cannot reach at ANY scale (vs ~3% in easy scenarios) -- confirmed by exhaustively ruling out the alternatives first: per-template calibration only marginally changed yield (51.9%->56.1%, "scenarios below 3 in-tolerance" unchanged), raising `max_correction_attempts` from 4 to 20 did not move 3 of 4 stuck templates AT ALL, and substituting each stuck template's antipodal (rotation+180) orientation was unreliable (helped some cases, made others measurably worse).
+
+**Fix 1**: `_tune_waypoints` now stops correcting a template once two consecutive attempts build a near-identical distance (`PLATEAU_DISTANCE_EPSILON_M`) **AND** an identical node path, keeping whatever `best` attempt it already found. Pure latency win, provably zero effect on which candidate a plateaued template returns (the tracked `best` is unchanged by stopping early). Distance similarity alone is deliberately not sufficient: on a grid-like street network two genuinely different routes can coincidentally land on the same length while the template is still actively converging, so the node path (the actual graph route, already available from `_build_loop_via_waypoints`) is the property that proves the route -- not just its length -- hasn't changed. Verified this hardening (added in review) changes neither the full-suite p95 (2.241s -> 2.245s, within run-to-run noise) nor round count=5 reliability (93.3% -> 93.3%, bit-for-bit identical) on the same commit -- the false-positive case this closes is real in theory but was not skewing the measured numbers in practice.
+
+**Root cause 2 -- a real bug in diverse candidate selection.** Reproduced the exact mechanism behind a count=5 failure end-to-end (not just the aggregate rate): `orchestration.plan_routes`'s non-mix path called `select_diverse` once over the WHOLE ranked candidate pool. `select_diverse`'s single greedy scan, on finding a higher-ranked candidate skipped for overlapping an already-picked one, keeps walking DOWN the ranked list for any non-overlapping replacement -- including one from a strictly worse `_constraint_tier` (outside distance tolerance) -- before ever reconsidering the skipped, same-tier candidate. Measured directly for "Inwood Hill Park, 8mi" at count=5: the pool had exactly 5 genuinely in-tolerance candidates (errors 6/15/43/53/87m), but two of them (15m and 43m) traced near-identical streets (0.813 Jaccard overlap -- narrow topology has only one viable corridor), so the 43m candidate was skipped and the scan reached all the way to an 801m-error candidate before the loop had filled its 5 slots -- silently swapping a passing route for a failing one.
+
+**Fix 2**: added `orchestration._select_diverse_within_tiers`, applying `select_diverse` WITHIN each `_constraint_tier` instead of across the whole pool -- mirrors `_select_mix_portfolio`'s already-proven tier-by-tier pattern (same guarantee, minus shape allocation), so a candidate can only ever be picked in place of one from its own tier, never a better one. General correctness fix (benefits v1 candidates too, not polygon-specific); does not touch facility matching/assignment/`FacilitySpatialIndex` at all.
+
+**Full 537-scenario suite, same commit, before vs after both fixes** (`scripts/benchmark_suite.py`, count=5):
+
+| Metric | v1 (unchanged) | polygon (before this follow-up) | polygon (after) |
+|---|---|---|---|
+| p95 latency | 1.498s | 2.295s | 2.241s (**still FAILS <2.0s**) |
+| Within +/-100m | 537/537 (100.0%) | 536/537 (99.8%) | 536/537 (99.8%, unchanged) |
+
+The remaining p95 overage is the SAME doubly-expensive scenario class as before (e.g. "Battery Park tip, huge target": 2.144s polygon-alone here, still near the historical v1-alone cost of ~1.3-1.8s for the same scenario) -- both generators are independently expensive there, and the plateau fix only removes WASTED work, not the floor cost of the templates that do converge plus the V1 fallback this scenario still needs.
+
+**Count reliability, real `plan_routes` path, same commit** (`scripts/benchmark_count_reliability.py`):
+
+| Metric (round shape) | v1, count=3 | polygon, count=3 | v1, count=5 | polygon, count=5 (before) | polygon, count=5 (after) |
+|---|---|---|---|---|---|
+| All returned within +/-100m | 100.0% | 100.0% (unchanged) | 99.4% | 90.0% | **93.3% (still FAILS >=98.5%)** |
+| Candidate within-100m rate | 100.0% | 100.0% | 99.9% | 97.6% | 98.4% |
+
+Fix 2 (tier-aware selection) measurably improved count=5 reliability (+3.3 points) by recovering exactly the cases where enough in-tolerance candidates existed but were being incorrectly displaced. It cannot manufacture a 5th in-tolerance candidate in scenarios where fewer than 5 templates converge natively at all (a genuine yield ceiling, not a selection-order bug) -- closing the remaining gap needs either a deeper change to polygon's own template search (e.g. asymmetric per-leg scaling instead of uniform rectangle scaling, so a template's blocked leg doesn't force the whole loop short) or a larger V1 fallback, the latter explicitly out of scope for this follow-up.
+
+**Geometry** (`scripts/benchmark_polygon_loop.py`): unchanged -- isoperimetric quotient 0.160->0.465, elongation 5.13->1.41, radial exposure 0.404->0.299, identical to the original migration's numbers. Neither fix touches geometry: the plateau fix returns the same `best` candidate just faster, and the tier fix only reorders which already-scored candidates are kept.
+
+**Facility benchmark**: re-run and unchanged from the documented baseline -- Stratum A 117/117, Stratum B 18/18 -> 0/18 -> 0/18 -> 0/18 (2.8% partial), Stratum C 12/12. Confirms the plateau fix (shared machinery with the constrained round planner) introduced no regression there.
+
+**Decision: `v1` remains the default.** Both remaining gates (p95 latency, count=5 reliability) are real, evidence-backed, and were NOT closed by this follow-up despite exhausting the plausible smallest-fix options (per-template calibration, wider correction budgets, antipodal substitution, plateau detection, tier-aware selection). Closing them would require either a genuine architectural change to polygon's template search or accepting a larger fallback -- both out of scope here. `ROUND_GENERATOR=polygon` remains a fully-tested opt-in with materially better (if not fully closed) numbers than before this follow-up.
+
 ## How to read the numbers
 
 | Claim | Means | Does not mean |

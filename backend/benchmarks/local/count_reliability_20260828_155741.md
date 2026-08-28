@@ -1,0 +1,56 @@
+# No-facility count-reliability benchmark — 2026-08-28T15:57:41
+
+Fills the blind spot in the historical 537-scenario suite (scripts/benchmark_suite.py), whose only success criterion was ">=1 valid route" -- it never asserted the RETURNED count matched the REQUESTED count. This exercises the real product code path (`app.facilities.orchestration.plan_routes` with `facility_requirements=[]`), not `generate_candidates` directly, which bypasses the no-facility overcomplete-pool policy entirely (see `app.facilities.orchestration.natural_match_pool`).
+
+## requested count = 3
+
+| shape | scenarios | exact-count % | all-returned-within-100m % | exact-count AND all-within-100m % | median returned | returned==1 | returned==2 | candidate within-100m rate | median overlap | median latency | p95 latency |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| round | 180 | 100.0% | 100.0% | 100.0% | 3.0 | 0 | 0 | 100.0% | 0.064 | 0.498s | 1.479s |
+| out_and_back | 179 | 100.0% | 100.0% | 100.0% | 3.0 | 0 | 0 | 100.0% | 0.008 | 0.161s | 0.207s |
+| mix | 178 | 100.0% | 100.0% | 100.0% | 3.0 | 0 | 0 | 100.0% | 0.034 | 0.533s | 1.491s |
+| ALL | 537 | 100.0% | 100.0% | 100.0% | 3.0 | 0 | 0 | 100.0% | 0.034 | 0.277s | 1.405s |
+
+## requested count = 5
+
+| shape | scenarios | exact-count % | all-returned-within-100m % | exact-count AND all-within-100m % | median returned | returned==1 | returned==2 | candidate within-100m rate | median overlap | median latency | p95 latency |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| round | 180 | 100.0% | 93.3% | 93.3% | 5.0 | 0 | 0 | 98.4% | 0.060 | 0.493s | 1.452s |
+| out_and_back | 179 | 98.3% | 99.4% | 98.3% | 5.0 | 0 | 0 | 99.9% | 0.009 | 0.163s | 0.212s |
+| mix | 178 | 100.0% | 100.0% | 100.0% | 5.0 | 0 | 0 | 100.0% | 0.030 | 0.533s | 1.531s |
+| ALL | 537 | 99.4% | 97.6% | 97.2% | 5.0 | 0 | 0 | 99.4% | 0.032 | 0.268s | 1.396s |
+
+## Known hard-case detail
+
+| scenario | shape | requested | returned | time |
+|---|---|---|---|---|
+| HARD - Battery Park City tip, out_and_back huge | out_and_back | 3 | 3 | 0.195s |
+| HARD - Battery Park City tip, out_and_back huge | out_and_back | 5 | 5 | 0.210s |
+| HARD - Battery Park tip, huge target | round | 3 | 3 | 1.851s |
+| HARD - Battery Park tip, huge target | round | 5 | 5 | 1.795s |
+| HARD - Battery Park tip, tiny target | mix | 3 | 3 | 0.160s |
+| HARD - Battery Park tip, tiny target | mix | 5 | 5 | 0.194s |
+| HARD - Brooklyn Bridge approach, tiny + amenity | round | 3 | 3 | 0.202s |
+| HARD - Brooklyn Bridge approach, tiny + amenity | round | 5 | 5 | 0.171s |
+| HARD - Central Park Reservoir, tiny loop | round | 3 | 3 | 0.150s |
+| HARD - Central Park Reservoir, tiny loop | round | 5 | 5 | 0.150s |
+| HARD - FDR Drive edge, amenity required | out_and_back | 3 | 3 | 0.140s |
+| HARD - FDR Drive edge, amenity required | out_and_back | 5 | 5 | 0.173s |
+| HARD - GWB approach, steep + amenity-sparse | out_and_back | 3 | 3 | 0.160s |
+| HARD - GWB approach, steep + amenity-sparse | out_and_back | 5 | 5 | 0.163s |
+| HARD - Harlem River bend, tiny target | round | 3 | 3 | 0.177s |
+| HARD - Harlem River bend, tiny target | round | 5 | 5 | 0.178s |
+| HARD - Inwood tip, huge target | out_and_back | 3 | 3 | 0.217s |
+| HARD - Inwood tip, huge target | out_and_back | 5 | 5 | 0.194s |
+| HARD - Inwood tip, tiny target | round | 3 | 3 | 0.161s |
+| HARD - Inwood tip, tiny target | round | 5 | 5 | 0.161s |
+| HARD - Manhattan Bridge approach, tiny target | out_and_back | 3 | 3 | 0.156s |
+| HARD - Manhattan Bridge approach, tiny target | out_and_back | 5 | 5 | 0.125s |
+| HARD - Randall's Island footbridge, edge of graph | mix | 3 | 3 | 0.457s |
+| HARD - Randall's Island footbridge, edge of graph | mix | 5 | 5 | 0.488s |
+| HARD - Roosevelt Island footbridge, narrow strip | round | 3 | 3 | 0.576s |
+| HARD - Roosevelt Island footbridge, narrow strip | round | 5 | 5 | 0.609s |
+| HARD - Swindler Cove, amenity-sparse hilly | mix | 3 | 3 | 0.768s |
+| HARD - Swindler Cove, amenity-sparse hilly | mix | 5 | 5 | 0.768s |
+| HARD - West Side Highway edge, huge target | mix | 3 | 3 | 1.296s |
+| HARD - West Side Highway edge, huge target | mix | 5 | 5 | 1.305s |
