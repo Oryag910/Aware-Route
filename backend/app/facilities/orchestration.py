@@ -212,6 +212,63 @@ def _constraint_tier(item: ScoredRoute) -> tuple[int, int, int, float, float]:
     return key[0], key[1], key[2], key[3], key[4]
 
 
+def _select_diverse_within_tiers(scored: list[ScoredRoute], count: int) -> list[ScoredRoute]:
+    """Tier-aware counterpart to a plain `select_diverse(scored, ...,
+    count)` call for the non-mix (round / out_and_back) path.
+
+    `select_diverse` is a single greedy scan over the WHOLE ranked
+    list: once a higher-ranked item is skipped for overlapping an
+    already-picked one, the scan keeps walking downward looking for
+    ANY non-overlapping item to fill the remaining slots -- including
+    one from a strictly worse `_constraint_tier` (e.g. outside distance
+    tolerance) -- before ever getting a chance to reconsider the
+    skipped, better-tier item. Measured root cause of a real count=5
+    reliability gap: in constrained/narrow local topology, the FEW
+    candidates that converge to a genuine round loop often trace
+    near-identical streets (there's only one viable corridor), so two
+    in-tolerance candidates can overlap enough to trigger exactly this
+    -- the scan reaches an out-of-tolerance candidate ranked far below
+    before the skipped in-tolerance one is ever reconsidered, and a
+    tolerance-passing route is silently swapped for a failing one.
+
+    This applies diversity WITHIN each tier instead: a whole tier that
+    fits in the remaining slots is taken outright, and `select_diverse`
+    only ever picks a SUBSET of a tier too large for the remaining
+    slots -- so a candidate can never be selected ahead of a
+    same-or-better tier candidate, only in place of one from its own
+    tier. Mirrors `_select_mix_portfolio`'s already-proven tier-by-tier
+    pattern (which guarantees the identical property for mix's shape
+    allocation), minus the shape bookkeeping."""
+    if count <= 1 or not scored:
+        return scored[:count]
+
+    def geometry_of(item: ScoredRoute) -> Any:
+        return item.route.candidate.geometry
+
+    chosen: list[ScoredRoute] = []
+    index = 0
+    while index < len(scored) and len(chosen) < count:
+        tier_key = _constraint_tier(scored[index])
+        tier_items: list[ScoredRoute] = []
+        while index < len(scored) and _constraint_tier(scored[index]) == tier_key:
+            tier_items.append(scored[index])
+            index += 1
+
+        slots_left = count - len(chosen)
+        picked = (
+            tier_items
+            if len(tier_items) <= slots_left
+            else select_diverse(tier_items, geometry_of, slots_left)
+        )
+        chosen.extend(picked)
+
+    # Tier-then-diversity selection only decides membership -- restore
+    # overall rank order for display, same as `_select_mix_portfolio`.
+    rank_position = {id(item): index for index, item in enumerate(scored)}
+    chosen.sort(key=lambda item: rank_position[id(item)])
+    return chosen[:count]
+
+
 def _select_mix_portfolio(scored: list[ScoredRoute], count: int) -> list[ScoredRoute]:
     """`scored` is already sorted by `rank_key`, so equal-tier candidates
     are contiguous. Shape allocation (`MIX_SHAPE_ALLOCATION`) is applied
@@ -428,4 +485,4 @@ def plan_routes(
     if shape == "mix":
         return _select_mix_portfolio(scored, count)
 
-    return select_diverse(scored, lambda s: s.route.candidate.geometry, count)
+    return _select_diverse_within_tiers(scored, count)

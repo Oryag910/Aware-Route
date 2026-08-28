@@ -24,14 +24,17 @@ after `engine._round_pairs` added an in-tolerance-first ranking +
 bounded V1 top-up, since this module's own "never splice a spur"
 design can leave narrow/constrained local topology at large target
 distances without enough in-tolerance candidates). Two gaps remain
-open, though: the full-suite p95 latency (2.295s, after a real
-`reuse_penalty` optimization) still sits above the project's historical
-p95<2.0s raw-generation gate, concentrated in a handful of extreme
-peninsula-tip/huge-target scenarios; and separately, at the API's
-supported count=5 (not the product default), round-shape reliability is
-still meaningfully below V1 (~90.0% vs ~98.9% all-within-tolerance) --
-the in-tolerance-first fallback targets the product default, not this
-wider case. `ROUND_GENERATOR=polygon` opts in today; see
+open, though: the full-suite p95 latency (2.241s, after a real
+`reuse_penalty` optimization AND this module's own scale-correction
+plateau fix -- see `PLATEAU_DISTANCE_EPSILON_M`) still sits above the
+project's historical p95<2.0s raw-generation gate, concentrated in a
+handful of extreme peninsula-tip/huge-target scenarios; and separately,
+at the API's supported count=5 (not the product default), round-shape
+reliability is still meaningfully below V1 (~93.3% vs ~99.4%
+all-within-tolerance) -- the in-tolerance-first fallback targets the
+product default, not this wider case, and a diversity-selection fix
+(`orchestration._select_diverse_within_tiers`) closed part but not all
+of this gap. `ROUND_GENERATOR=polygon` opts in today; see
 docs/benchmarks.md for the full same-commit V1-vs-polygon numbers
 both gaps are based on.
 """
@@ -96,6 +99,17 @@ DEFAULT_TOLERANCE_M = 100.0
 MIN_SCALE = 0.4
 MAX_SCALE = 2.2
 MAX_CORRECTION_ATTEMPTS = 4  # extra rebuilds beyond the initial calibrated attempt
+
+# A rescale attempt whose built distance is within this of the PREVIOUS
+# attempt's, despite scale having changed, means the correction is
+# plateaued rather than converging -- see `_tune_waypoints`'s docstring
+# for the measured mechanism (a synthetic anchor snapping to the same
+# graph node regardless of how much further out it's requested, once
+# the requested point is off-graph). A true plateau reproduces the
+# IDENTICAL route (same snapped nodes -> same shortest path -> same
+# length), so this only needs to be larger than floating-point noise,
+# not a real distance-tuning threshold like `DEFAULT_TOLERANCE_M`.
+PLATEAU_DISTANCE_EPSILON_M = 1.0
 
 # A genuine 4-leg loop should retrace almost nothing along the way. A
 # plain out-and-back's edge_reuse_ratio is ~0.5 (every outbound edge
@@ -297,11 +311,27 @@ def _tune_waypoints(
     budget means no correction attempt starts, and `best` (whatever was
     already built, `None` if nothing was) is returned as-is rather than
     attempting one more rebuild.
+
+    Correction also stops early if a rebuild's distance plateaus (see
+    `PLATEAU_DISTANCE_EPSILON_M`) -- measured root cause: when a
+    template's rotation points toward the edge of the routable graph
+    (a peninsula tip's water boundary, a park/highway edge with no
+    further street network), the synthetic anchor keeps moving further
+    away as `scale` grows, but `_NodeIndex.nearest()` keeps snapping it
+    to the SAME boundary-closest graph node -- so the built route (same
+    snapped nodes -> same shortest path) is bit-for-bit identical no
+    matter how many more scale corrections are tried. Continuing to
+    rebuild in that state is pure wasted Dijkstra work (confirmed:
+    scale 1.5/2.0/2.2/3.0/5.0 all snapped to the same node in one
+    measured hard case) chasing a target this orientation cannot reach
+    at any scale; `best` already holds whatever this template's closest
+    honest attempt was, unaffected by stopping early.
     """
     scale = initial_scale
     best: tuple[RouteCandidate, list[int]] | None = None
     best_error = float("inf")
     history: list[tuple[float, float]] = []
+    last_distance: float | None = None
 
     for _ in range(1 + max_correction_attempts):
         if should_continue is not None and not should_continue():
@@ -320,6 +350,10 @@ def _tune_waypoints(
 
         if best_error <= tolerance_m or distance <= 0:
             break
+
+        if last_distance is not None and abs(distance - last_distance) <= PLATEAU_DISTANCE_EPSILON_M:
+            break  # plateaued -- further rescaling won't change the built route
+        last_distance = distance
 
         if use_secant_refinement:
             history.append((scale, distance))

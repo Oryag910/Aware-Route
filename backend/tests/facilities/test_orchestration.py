@@ -9,6 +9,7 @@ from app.facilities.models import Facility
 from app.facilities.orchestration import (
     ConstrainedPlanner,
     ScoredRoute,
+    _select_diverse_within_tiers,
     _select_mix_portfolio,
     natural_match_pool,
     plan_routes,
@@ -177,6 +178,67 @@ def _scored(
         quality_score=0.0,
         fully_valid=is_fully_valid(geometry, distance_error_m, facility_score),
     )
+
+
+# --- Tier-aware diverse selection (non-mix shapes) ----------------------
+
+
+def test_diverse_selection_never_lets_worse_tier_displace_same_tier_overlap() -> None:
+    """Root-cause regression: a plain `select_diverse` call over the
+    WHOLE ranked list keeps scanning past a same-tier candidate skipped
+    for overlap, all the way into a worse hard-constraint tier, if a
+    worse-tier candidate happens not to overlap anything already picked
+    -- silently displacing an equal-or-better candidate. `A` and `B`
+    are both fully-valid (round=8mi) with IDENTICAL geometry (fully
+    overlapping); `E` is a distinct-geometry PARTIAL match (worse
+    tier). At count=2, the fully-valid tier alone already fills every
+    requested slot, so it must be taken outright -- `E` must never
+    appear in the result, even though the naive scan would have picked
+    it over the skipped, overlapping `B`."""
+    a = _scored("round", 0.00, satisfied=1, total=1)
+    b = _scored("round", 0.00, satisfied=1, total=1)  # identical geometry to a
+    e = _scored("round", 5.00, satisfied=0, total=1)  # distinct geometry, worse tier
+    scored = [a, b, e]  # already best-to-worst
+
+    result = _select_diverse_within_tiers(scored, 2)
+    result_ids = {id(item) for item in result}
+
+    assert len(result) == 2
+    assert id(e) not in result_ids
+    assert result_ids == {id(a), id(b)}
+
+
+def test_diverse_selection_prefers_distinct_geometry_within_tier() -> None:
+    """Within a single tier too large to take outright, diversity still
+    picks the non-overlapping alternative over a redundant one -- this
+    is the SAME behavior `select_diverse` already gives standalone,
+    just scoped to one tier instead of the whole ranked list."""
+    a = _scored("round", 0.00, satisfied=1, total=1)
+    b = _scored("round", 0.00, satisfied=1, total=1)  # identical geometry to a
+    c = _scored("round", 5.00, satisfied=1, total=1)  # distinct geometry
+    scored = [a, b, c]  # all one tier (all fully valid)
+
+    result = _select_diverse_within_tiers(scored, 2)
+    result_ids = {id(item) for item in result}
+
+    assert len(result) == 2
+    assert id(a) in result_ids
+    assert id(c) in result_ids
+    assert id(b) not in result_ids
+
+
+def test_diverse_selection_backfills_from_worse_tier_when_better_tier_is_exhausted() -> None:
+    """Tier isolation must not break the "always return `count` items"
+    contract: if the better tier genuinely doesn't have enough MEMBERS
+    (not just enough diversity) to fill every slot, worse-tier
+    candidates still backfill the remainder."""
+    a = _scored("round", 0.00, satisfied=1, total=1)
+    e = _scored("round", 5.00, satisfied=0, total=1)
+    scored = [a, e]  # top tier has only one member; count needs two
+
+    result = _select_diverse_within_tiers(scored, 2)
+
+    assert result == [a, e]
 
 
 def test_mix_portfolio_never_lets_partial_shape_displace_fully_valid() -> None:
