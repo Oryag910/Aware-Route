@@ -230,7 +230,7 @@ def _extend_to_turnaround(
     target_half_m: float,
     start_coord: Coordinate,
     corridor_bearing: float,
-    used_pairs: set[frozenset[int]],
+    used_pairs: set[tuple[int, int]],
     deadline: PlanningDeadline,
 ) -> list[int] | None:
     """Real (bounded) Dijkstra from `last_node`, picking an extension

@@ -9,6 +9,7 @@ from app.generation.polygon_amenity import polygon_loop_through_amenities_pairs
 from app.generation.polygon_loop import polygon_loop_pairs
 from app.generation.round_route import round_pairs
 from app.generation.routes import GeneratedRoute, compute_quality
+from app.generation.shape_metrics import isoperimetric_quotient
 from app.graph.distances import nearest_node, single_source_paths
 from app.routing.provider import Coordinate, RouteCandidate
 
@@ -19,32 +20,161 @@ RoundGenerator = Literal["v1", "polygon"]
 
 
 def _round_generator_version() -> RoundGenerator:
-    """Feature selector for explicit `shape="round"` local generation
-    (PR #16): "v1" (default -- see below) or "polygon" (the new
-    multi-anchor generator, opt-in). Sourced from the `ROUND_GENERATOR`
-    environment variable so it can be flipped without a code change.
-    Only affects `shape == "round"` in `generate_routes` below --
-    "mix" always uses V1's `round_pairs`/`through_amenities_pairs` for
-    its round component regardless of this setting (mix's own redesign
-    is PR #17), and "out_and_back" is untouched by PR #16 entirely.
+    """Feature selector for ordinary round-pool generation: "v1"
+    (default) or "polygon" (opt-in, staged for promotion -- see below).
+    Sourced from the `ROUND_GENERATOR` environment variable so it can be
+    flipped without a code change. Applies everywhere an ORDINARY round
+    candidate pool is built for the generic `/routes` path -- explicit
+    `shape="round"` AND the round component of `shape="mix"` (both go
+    through `_round_pairs` below), plus `facilities.orchestration`'s
+    overcomplete natural-match pools, since those call the same
+    `generate_routes` seam. "out_and_back" is untouched. The deprecated
+    `/routes/with-restroom` endpoint's amenity-aware branch further down
+    this file also reads this flag for its own "round" case, unchanged
+    from PR #16 -- but its "mix" case still hardcodes V1's
+    `through_amenities_pairs` regardless, since that legacy contract is
+    out of scope for this migration.
 
-    Default is "v1", NOT "polygon", despite polygon's geometry being
+    Default has been "v1" since PR #16/#17 and STAYS "v1" here despite a
+    full re-evaluation (this migration): polygon's geometry is
     substantially better on every measured axis (radial exposure,
-    elongation, compactness, zero tuner-generated start spurs) and its
-    amenity-aware reliability clearing the >=95% bar (98.9% on the
-    matched 89-scenario benchmark). The blocker is latency: the full
-    537-scenario benchmark's p95 latency with polygon as default is
-    2.27s, still above the project's existing p95<2.0s gate even after
-    a dedicated optimization pass (secant-method distance-tuning
-    convergence + early-stopping the amenity/template search once
-    enough candidates are found -- see scripts/benchmark_polygon_loop.py
-    and scripts/benchmark_polygon_amenity.py for the exact numbers this
-    default was chosen from). Set `ROUND_GENERATOR=polygon` to opt in
-    for explicit testing/staged rollout ahead of a future latency pass
-    that closes this gap.
+    elongation, compactness, zero tuner-generated start spurs) and,
+    after PR #25 replaced O(facilities x segments) facility-encounter
+    scoring with `FacilitySpatialIndex` (removing what used to be the
+    dominant latency cost on real multi-facility requests regardless of
+    round generator), polygon's own generation-latency picture is far
+    better than the original PR #16 opt-in gate (p95 2.27s): a targeted
+    `reuse_penalty._reuse_penalty_weight` optimization (this migration)
+    plus a within-tolerance-first ranking + bounded V1 top-up fix for a
+    real reliability regression (see `_round_pairs`) brought the full
+    537-scenario p95 down to 2.295s and count=3 round reliability up to
+    100.0% (matching/exceeding V1's 99.4%). Two measured gaps remain,
+    both reported in docs/benchmarks.md rather than papered over:
+
+    1. Full-suite p95 latency (2.295s) is still above the project's
+       historical p95<2.0s raw-generation gate -- concentrated in a
+       small number of genuinely extreme scenarios (peninsula-tip start
+       points at large target distances) where polygon's own
+       multi-anchor search and V1's fallback turnaround search are each
+       independently expensive, so the reliability fix's fallback
+       stacks both costs on exactly those requests.
+    2. At the API's supported count=5 (not the product default),
+       round-shape "all returned within tolerance" is only ~90.0% under
+       polygon vs V1's ~98.9% -- `MIN_WITHIN_TOLERANCE_FLOOR` targets
+       the product default (count=3, where polygon is at 100.0%), not
+       this wider stress case, so count=5 still shows a real reliability
+       gap this migration did not close.
+
+    Per this migration's own instructions: do not silently redefine a
+    gate or minimize a gap to ship the default anyway -- report both
+    tradeoffs and leave the switch here. Set `ROUND_GENERATOR=polygon`
+    to opt in now; flipping this default to "polygon" is a follow-up
+    once both gaps are closed or the gates are deliberately revisited.
     """
     value = os.environ.get("ROUND_GENERATOR", "v1").strip().lower()
     return "polygon" if value == "polygon" else "v1"
+
+
+# Below this many of polygon's own within-tolerance candidates, top up
+# the pool with V1 (see `_round_pairs`). Deliberately the API's max
+# product `count` (5), not the (often much larger) overcomplete pool
+# size `_round_pairs` actually receives -- the goal is "enough genuinely
+# in-tolerance candidates to satisfy any real request downstream," not
+# "every candidate in the pool must be in tolerance." Narrow/constrained
+# local topology (e.g. upper-Manhattan peninsulas) at larger target
+# distances can leave several of polygon's 10 templates unable to close
+# to within `DEFAULT_TOLERANCE_M` at any scale in its bounds -- measured
+# via `scripts/benchmark_count_reliability.py`: round-shape "all 3
+# returned within tolerance" dropped from V1's 99.4% to polygon-alone's
+# 84.4% on the same commit, concentrated in exactly this geography/
+# distance combination (see docs/benchmarks.md).
+MIN_WITHIN_TOLERANCE_FLOOR = 5
+
+
+def _tolerance_first(
+    pairs: list[tuple[RouteCandidate, list[int]]], target_distance_m: float
+) -> list[tuple[RouteCandidate, list[int]]]:
+    """Rank a round pool within-tolerance-first, roundest-first within
+    each tier. `polygon_loop_pairs` on its own ranks purely by
+    isoperimetric quotient, which can rank an off-target-but-rounder
+    candidate ahead of an in-tolerance one even when the pool has
+    plenty of in-tolerance candidates to spare -- this is the second
+    half of the fix `_round_pairs` needs (see `MIN_WITHIN_TOLERANCE_FLOOR`
+    for the first): a caller that only keeps the top few (e.g. a bare
+    `generate_candidates` call with no downstream re-ranking) must not
+    have distance accuracy silently lose to roundness."""
+
+    def sort_key(pair: tuple[RouteCandidate, list[int]]) -> tuple[int, float]:
+        candidate, _node_path = pair
+        within_tolerance = abs(candidate.distance_m - target_distance_m) <= DEFAULT_TOLERANCE_M
+        return (0 if within_tolerance else 1, -isoperimetric_quotient(candidate.geometry))
+
+    return sorted(pairs, key=sort_key)
+
+
+def _dedup_pairs(
+    pairs: list[tuple[RouteCandidate, list[int]]],
+) -> list[tuple[RouteCandidate, list[int]]]:
+    seen: set[tuple[tuple[float, float], ...]] = set()
+    unique: list[tuple[RouteCandidate, list[int]]] = []
+    for candidate, node_path in pairs:
+        key = tuple((point.lat, point.lon) for point in candidate.geometry)
+        if key in seen:
+            continue
+        seen.add(key)
+        unique.append((candidate, node_path))
+    return unique
+
+
+def _round_pairs(
+    graph: Any,
+    start_node: int,
+    dists: dict[int, float],
+    target_distance_m: float,
+    count: int,
+    paths: dict[int, list[int]] | None,
+) -> list[tuple[RouteCandidate, list[int]]]:
+    """Shared round-pool seam: the ONE place that decides V1 vs polygon
+    for an ordinary round candidate pool, per `_round_generator_version`.
+    Used by both explicit `shape="round"` and `shape="mix"`'s round
+    component below, so neither can silently diverge from the other --
+    see `_round_generator_version`'s docstring for the PR #16/#17
+    history this replaces (mix used to hardcode V1 regardless of the
+    flag).
+
+    When polygon is selected, its own pool is topped up with V1
+    candidates whenever polygon alone can't supply
+    `MIN_WITHIN_TOLERANCE_FLOOR` in-tolerance candidates, and the
+    combined pool is ranked in-tolerance-first (see
+    `MIN_WITHIN_TOLERANCE_FLOOR` and `_tolerance_first`) -- polygon's
+    better geometry still wins whenever it actually has enough
+    in-tolerance candidates to offer (the common case), and V1's
+    spur-guaranteed convergence is the fallback exactly where polygon's
+    never-splice-a-spur design can leave a scenario short, never a
+    silent, unconditional blend of the two."""
+    if _round_generator_version() != "polygon":
+        return _tuned_pairs(graph, start_node, dists, "round", target_distance_m, count, paths)
+
+    polygon_pairs = polygon_loop_pairs(graph, start_node, target_distance_m, count, paths)
+    within_tolerance = sum(
+        1
+        for candidate, _node_path in polygon_pairs
+        if abs(candidate.distance_m - target_distance_m) <= DEFAULT_TOLERANCE_M
+    )
+    tolerance_floor = min(count, MIN_WITHIN_TOLERANCE_FLOOR)
+    if within_tolerance >= tolerance_floor:
+        return _tolerance_first(polygon_pairs, target_distance_m)[:count]
+
+    # Only ask V1 for enough candidates to close the shortfall, not a
+    # full `count`-sized pool -- V1's own turnaround search already
+    # scales with what it's asked for (`round_pairs` requests
+    # `min(v1_count * 2, MAX_TURNAROUND_ATTEMPTS)` turnarounds), so
+    # asking for fewer meaningfully cuts the extra Dijkstra work this
+    # fallback pays on top of polygon's own (already-paid) cost.
+    v1_count = max(1, tolerance_floor - within_tolerance)
+    v1_pairs = _tuned_pairs(graph, start_node, dists, "round", target_distance_m, v1_count, paths)
+    combined = _dedup_pairs(polygon_pairs + v1_pairs)
+    return _tolerance_first(combined, target_distance_m)[:count]
 
 
 def _tuned_pairs(
@@ -139,13 +269,13 @@ def generate_routes(
     )
     final_count = count if result_count is None else result_count
 
-    if shape == "round" and _round_generator_version() == "polygon":
+    if shape == "round":
         pool = _to_routes(
             graph,
-            polygon_loop_pairs(graph, start_node, target_distance_m, count, paths),
+            _round_pairs(graph, start_node, dists, target_distance_m, count, paths),
             "round",
         )
-    elif shape in ("round", "out_and_back"):
+    elif shape == "out_and_back":
         pool = _to_routes(
             graph,
             _tuned_pairs(
@@ -155,12 +285,13 @@ def generate_routes(
         )
     else:
         # "mix": union both shape pools, dedup, keep the count best by
-        # roundness (mirrors the candidate-only path's ranking).
+        # roundness (mirrors the candidate-only path's ranking). The
+        # round component goes through the SAME seam (`_round_pairs`) as
+        # explicit shape="round" above, so ROUND_GENERATOR applies
+        # consistently to both.
         round_pool = _to_routes(
             graph,
-            _tuned_pairs(
-                graph, start_node, dists, "round", target_distance_m, count, paths
-            ),
+            _round_pairs(graph, start_node, dists, target_distance_m, count, paths),
             "round",
         )
         out_back_pool = _to_routes(
@@ -319,12 +450,13 @@ def generate_polygon_loop_candidates(
 
     Standalone entry point used directly by
     scripts/benchmark_polygon_loop.py for side-by-side V1-vs-V2
-    comparison. `generate_routes`'s `shape == "round"` branch also
+    comparison. `generate_routes`'s shared `_round_pairs` seam also
     calls `polygon_loop_pairs` directly (this function's own
-    implementation, inlined) when `ROUND_GENERATOR=polygon` is set
-    explicitly -- see `_round_generator_version`. The default remains
-    V1; "mix" and "out_and_back" are unaffected regardless of the flag
-    and always keep using V1 `round_pairs`/`out_and_back_pairs`.
+    implementation, inlined) for both explicit `shape="round"` and
+    `shape="mix"`'s round component whenever `ROUND_GENERATOR=polygon`
+    is set (opt-in -- see `_round_generator_version` for why this isn't
+    the default yet). "out_and_back" is unaffected by the flag
+    regardless.
     """
     start_node = nearest_node(graph, start)
     _dists, paths = single_source_paths(graph, start_node)
@@ -349,12 +481,15 @@ def generate_polygon_loop_amenity_candidates(
     Standalone entry point used directly by
     scripts/benchmark_polygon_amenity.py for side-by-side V1-vs-V2
     comparison. `generate_routes`'s `shape == "round"` amenity-aware
-    branch also calls `polygon_loop_through_amenities_pairs` (this
-    function's own implementation, inlined) when
-    `ROUND_GENERATOR=polygon` is set explicitly -- see
-    `_round_generator_version`. The default remains V1; "mix" and
-    "out_and_back" are unaffected regardless of the flag and always
-    keep using V1 `through_amenities_pairs`.
+    branch (the deprecated `/routes/with-restroom` contract only) also
+    calls `polygon_loop_through_amenities_pairs` (this function's own
+    implementation, inlined) whenever `ROUND_GENERATOR=polygon` is set
+    (opt-in -- see `_round_generator_version`). Unlike
+    the non-amenity-aware seam (`_round_pairs`), this legacy branch's
+    "mix" case is NOT migrated -- it still hardcodes V1
+    `through_amenities_pairs` regardless of the flag, since
+    `/routes/with-restroom` is out of scope for this migration.
+    "out_and_back" is unaffected by the flag regardless.
     """
     triples = polygon_loop_through_amenities_pairs(
         graph, start, target_distance_m, snapped, min_range_m, max_range_m, count

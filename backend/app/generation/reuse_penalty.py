@@ -10,30 +10,48 @@ REUSE_PENALTY = 4.0
 
 
 def _reuse_penalty_weight(
-    outbound_pairs: set[frozenset[int]], penalty: float
+    outbound_pairs: set[tuple[int, int]], penalty: float
 ) -> Any:
     """Build a networkx callable edge weight that inflates the cost of
-    any edge whose endpoints were used on the outbound leg."""
+    any edge whose endpoints were used on the outbound leg.
+
+    This is the single hottest call in every reuse-penalized Dijkstra
+    (networkx invokes it once per edge relaxation) -- profiling a
+    multi-leg polygon-loop build showed it alone accounting for roughly
+    half of total wall-clock time, split between two allocations this
+    version avoids: `min(... for ...)` builds a throwaway generator on
+    every call even though the walk graph has exactly one parallel edge
+    the overwhelming majority of the time, and `frozenset((u, v))`
+    allocates a new hash-table-backed object per call just to test
+    membership. `outbound_pairs` uses plain `(min(u, v), max(u, v))`
+    tuples instead (see `edge_pairs`) -- equivalent as an undirected-edge
+    key, but a 2-tuple is far cheaper to construct and hash than a
+    frozenset.
+    """
 
     def weight(u: int, v: int, edge_dict: dict[Any, dict[str, Any]]) -> float:
-        base = float(min(data["length"] for data in edge_dict.values()))
-        if frozenset((u, v)) in outbound_pairs:
-            return base * penalty
-        return base
+        if len(edge_dict) == 1:
+            base = float(next(iter(edge_dict.values()))["length"])
+        else:
+            base = float(min(data["length"] for data in edge_dict.values()))
+        key = (u, v) if u <= v else (v, u)
+        return base * penalty if key in outbound_pairs else base
 
     return weight
 
 
-def edge_pairs(node_path: list[int]) -> set[frozenset[int]]:
-    """Undirected edge set implied by consecutive hops in `node_path`."""
-    return {frozenset((u, v)) for u, v in zip(node_path, node_path[1:])}
+def edge_pairs(node_path: list[int]) -> set[tuple[int, int]]:
+    """Undirected edge set implied by consecutive hops in `node_path`,
+    each pair canonicalized as `(min(u, v), max(u, v))` -- see
+    `_reuse_penalty_weight` for why this replaced `frozenset`."""
+    return {(u, v) if u <= v else (v, u) for u, v in zip(node_path, node_path[1:])}
 
 
 def reuse_penalized_path(
     graph: Any,
     source: int,
     target: int,
-    used_pairs: set[frozenset[int]],
+    used_pairs: set[tuple[int, int]],
     penalty: float = REUSE_PENALTY,
 ) -> list[int] | None:
     """Shortest path source -> target that avoids reusing any edge in
