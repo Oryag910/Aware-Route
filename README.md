@@ -1,6 +1,6 @@
 # Aware Route
 
-A Manhattan running-route planner that treats restroom and water stops as hard routing constraints, not map pins — built on a custom OSMnx/NetworkX graph engine, not a wrapper around a directions API.
+A Manhattan running-route planner that treats restroom and water stops as hard routing constraints, built on a custom OSMnx/NetworkX graph engine, not a wrapper around a directions API.
 
 **[Live demo →](https://aware-route-ashen.vercel.app)**
 
