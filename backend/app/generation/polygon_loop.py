@@ -18,17 +18,22 @@ shared seam (`engine._round_pairs`) that decides V1 vs polygon per
 of the flag, a gap this migration closes. `out_and_back` is untouched
 regardless. Polygon is NOT the default yet, though: see
 `engine._round_generator_version` for the full tradeoff this migration
-measured -- geometry, correctness, and count-reliability all clear the
-bar (the latter only after `engine._round_pairs` added an
-in-tolerance-first ranking + bounded V1 top-up, since this module's
-own "never splice a spur" design can leave narrow/constrained local
-topology at large target distances without enough in-tolerance
-candidates), but the full-suite p95 latency (2.295s, after a real
+measured -- geometry is substantially better and, at the product's
+count=3 default, correctness/reliability matches or beats V1 (only
+after `engine._round_pairs` added an in-tolerance-first ranking +
+bounded V1 top-up, since this module's own "never splice a spur"
+design can leave narrow/constrained local topology at large target
+distances without enough in-tolerance candidates). Two gaps remain
+open, though: the full-suite p95 latency (2.295s, after a real
 `reuse_penalty` optimization) still sits above the project's historical
 p95<2.0s raw-generation gate, concentrated in a handful of extreme
-peninsula-tip/huge-target scenarios. `ROUND_GENERATOR=polygon` opts in
-today; see docs/benchmarks.md for the full same-commit V1-vs-polygon
-numbers this call was based on.
+peninsula-tip/huge-target scenarios; and separately, at the API's
+supported count=5 (not the product default), round-shape reliability is
+still meaningfully below V1 (~90.0% vs ~98.9% all-within-tolerance) --
+the in-tolerance-first fallback targets the product default, not this
+wider case. `ROUND_GENERATOR=polygon` opts in today; see
+docs/benchmarks.md for the full same-commit V1-vs-polygon numbers
+both gaps are based on.
 """
 
 from collections.abc import Callable

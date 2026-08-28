@@ -65,7 +65,12 @@ A single genuinely-hard requirement is recovered every time. Two or more simulta
 
 `ROUND_GENERATOR` selects the generator behind every ordinary round candidate pool -- explicit `shape="round"` and `shape="mix"`'s round component alike (see [`architecture.md`](architecture.md)). This was previously gated on a single, now-stale full-suite p95 latency figure (2.27s) measured before [`FacilitySpatialIndex`](../backend/app/facilities/spatial_index.py) replaced O(facilities x segments) encounter scoring, the actual dominant cost on real multi-facility requests. This section is a fresh, same-commit re-evaluation after that change, run entirely on this repository's `backend/scripts` suites.
 
-**Result: `v1` remains the default.** Polygon's geometry and (after two targeted fixes below) its reliability both clear the bar, but its own full-suite p95 latency still sits above the historical <2.0s raw-generation gate on a small, well-characterized subset of scenarios. Per this project's own change-management standard, that gate is not silently redefined -- the evidence is reported here and the switch (`ROUND_GENERATOR=polygon`) is left for explicit, informed opt-in rather than forced into the default.
+**Result: `v1` remains the default.** Polygon's geometry is substantially better, and (after the reliability fix below) its correctness at the product's count=3 default matches or beats v1. Two gaps remain, and neither is hidden or downplayed because the other request shape is more common:
+
+1. **Full-suite p95 latency** (2.295s) is still above the historical <2.0s raw-generation gate, on a small, well-characterized subset of scenarios.
+2. **Round-shape reliability at the API's supported count=5** (~90.0% all-within-tolerance) is meaningfully below v1's ~98.9% -- this is a real, measured gap at a request shape the API actually serves, not just a count=3 footnote.
+
+Per this project's own change-management standard, neither gate is silently redefined or minimized -- the evidence for both is reported here and the switch (`ROUND_GENERATOR=polygon`) is left for explicit, informed opt-in rather than forced into the default.
 
 **Fixes made along the way, both landed regardless of the default decision:**
 - `app/generation/reuse_penalty.py`'s edge-weight callback (the single hottest function in every reuse-penalized Dijkstra call) was allocating a `frozenset` and a throwaway generator on every edge relaxation; replaced with plain `(min, max)` tuples and a fast-path for the (overwhelmingly common) single-parallel-edge case. This is a correctness-neutral, universal latency win -- it dropped the CURRENT-DEFAULT (v1) full-suite p95 from 1.991s to 1.543s, in addition to helping polygon.
@@ -100,7 +105,7 @@ The p95 gap is concentrated, not diffuse: e.g. the "Battery Park tip, huge targe
 | All returned within +/-100m | 99.4% | **100.0%** |
 | p95 latency | 0.921s | 1.553s |
 
-The count=5 secondary stress figure (not the live product default) shows a smaller residual gap under polygon (90.0% all-within-tolerance vs v1's 98.9%) -- `MIN_WITHIN_TOLERANCE_FLOOR` targets the product default, not this stress case; widening it further would trade more latency for a metric the product doesn't actually serve today.
+**At count=5 -- supported by the API, not just a stress figure -- the gap is real and unresolved**: round-shape all-within-tolerance is only 90.0% under polygon vs v1's 98.9%. `MIN_WITHIN_TOLERANCE_FLOOR` (5) is sized to guarantee the product's count=3 default, not count=5 -- at count=5 the pool needs every one of its 5 returned slots in tolerance, a stricter bar the current fallback threshold doesn't target. This is the second, independent reason (alongside p95 latency) polygon is not yet promoted to default; closing it would mean either raising the floor (more fallback triggers, more latency) or a deeper fix to polygon's own per-template convergence -- out of scope for this migration.
 
 **Facility benchmark (`scripts/benchmark_facilities.py`)**: unchanged from the documented baseline above -- Stratum A 117/117, Stratum B 18/18 -> 0/18 -> 0/18 -> 0/18 (2.8% partial), Stratum C 12/12 -- confirming the constrained multi-facility planner (which already used polygon's machinery directly, independent of `ROUND_GENERATOR`) and the generic facility-scoring/assignment contract are both untouched by this migration.
 

@@ -15,7 +15,7 @@ import networkx as nx
 import pytest
 
 import app.generation.engine as engine_module
-from app.generation.engine import generate_candidates, generate_routes
+from app.generation.engine import Shape, generate_candidates, generate_routes
 from app.generation.out_and_back import out_and_back_pairs as real_out_and_back_pairs
 from app.generation.polygon_loop import polygon_loop_pairs as real_polygon_loop_pairs
 from app.generation.round_route import round_pairs as real_round_pairs
@@ -166,15 +166,24 @@ def test_mix_still_uses_ordinary_out_and_back_generator(
     assert calls["oab"] >= 1
 
 
+@pytest.mark.parametrize("round_generator", ["v1", "polygon"])
 def test_overcomplete_result_count_still_exposes_both_shapes(
-    grid_graph: nx.MultiDiGraph, start: Coordinate
+    monkeypatch: pytest.MonkeyPatch,
+    grid_graph: nx.MultiDiGraph,
+    start: Coordinate,
+    round_generator: str,
 ) -> None:
     """`facilities.orchestration.natural_match_pool`'s overcomplete-pool
     contract (result_count > count skips roundest-first truncation) must
     still hold regardless of which round generator is selected: both
     shapes should survive into the returned pool rather than round
     candidates (which structurally score higher on isoperimetric
-    quotient) starving out every out_and_back candidate."""
+    quotient) starving out every out_and_back candidate. This is an
+    architectural guarantee of `generate_routes`'s mix-pool handling,
+    not something either round generator should be able to break, so
+    it's exercised under both."""
+    monkeypatch.setenv("ROUND_GENERATOR", round_generator)
+
     routes = generate_routes(
         grid_graph, start, TARGET_DISTANCE_M, "mix", count=8, result_count=8
     )
@@ -184,14 +193,28 @@ def test_overcomplete_result_count_still_exposes_both_shapes(
     assert "out_and_back" in shapes
 
 
+@pytest.mark.parametrize("round_generator", ["v1", "polygon"])
+@pytest.mark.parametrize("shape", ["round", "out_and_back", "mix"])
 def test_requested_final_count_is_respected(
-    monkeypatch: pytest.MonkeyPatch, grid_graph: nx.MultiDiGraph, start: Coordinate
+    monkeypatch: pytest.MonkeyPatch,
+    grid_graph: nx.MultiDiGraph,
+    start: Coordinate,
+    round_generator: str,
+    shape: Shape,
 ) -> None:
-    for round_generator in ("v1", "polygon"):
-        monkeypatch.setenv("ROUND_GENERATOR", round_generator)
-        for shape in ("round", "out_and_back", "mix"):
-            candidates = generate_candidates(grid_graph, start, TARGET_DISTANCE_M, shape, 3)
-            assert len(candidates) <= 3
+    """The real product contract is an EXACT count, not merely "at most"
+    -- `test_no_facilities_returns_full_requested_count` in
+    tests/test_generic_routes.py asserts this end-to-end on the real
+    Manhattan graph. This dense, well-connected synthetic grid has
+    plenty of turnaround/template alternatives for every generator/shape
+    combination at this target distance (confirmed deterministic across
+    repeated runs), so it can assert the same exact-count contract
+    directly against the engine layer, for both round generators."""
+    monkeypatch.setenv("ROUND_GENERATOR", round_generator)
+
+    candidates = generate_candidates(grid_graph, start, TARGET_DISTANCE_M, shape, 3)
+
+    assert len(candidates) == 3
 
 
 # ---------------------------------------------------------------------------
