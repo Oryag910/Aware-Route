@@ -82,11 +82,11 @@ Per this project's own change-management standard, neither gate is silently rede
 |---|---|---|
 | Scenarios succeeding | 537/537 | 537/537 |
 | Within +/-100m of target | 537/537 (100.0%) | 536/537 (99.8%) |
-| Median latency | 0.318s | 0.487s |
+| Median latency | 0.318s | 0.468s |
 | p95 latency | **1.543s** (PASS <2.0s) | **2.295s** (FAIL <2.0s) |
 | Max latency | 2.605s | 3.285s |
 
-The p95 gap is concentrated, not diffuse: e.g. the "Battery Park tip, huge target" hard-case scenario (a 12mi round loop from a peninsula tip) takes 1.774s under v1 alone and ~2.5s under polygon alone -- both generators are independently expensive there (large search radius, constrained topology), so the reliability fallback (which pays for both) pushes that specific case to ~4-5s raw generation. This is a handful of scenarios among 537, not a general regression -- median/p90 latency stay excellent under polygon.
+The p95 gap is concentrated, not diffuse: e.g. the "Battery Park tip, huge target" hard-case scenario (a 12mi round loop from a peninsula tip) takes 1.258s under v1 alone and 2.295s under polygon alone -- both generators are independently expensive there (large search radius, constrained topology), so the reliability fallback (which pays for both when polygon's own yield is thin) compounds on exactly this kind of case. This is a handful of scenarios among 537, not a general regression -- median/p90 latency stay excellent under polygon.
 
 **Geometry -- polygon materially better across the round population** (`scripts/benchmark_polygon_loop.py`, 91 matched round/non-amenity scenarios; see the generated report for the full breakdown):
 
