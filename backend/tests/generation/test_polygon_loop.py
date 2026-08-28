@@ -357,24 +357,30 @@ def test_tune_waypoints_expired_after_first_candidate_keeps_best(
     assert build_calls["n"] == 1
 
 
-def _fake_route_candidate(distance_m: float) -> tuple[RouteCandidate, list[int]]:
+def _fake_route_candidate(
+    distance_m: float, node_path: list[int] | None = None
+) -> tuple[RouteCandidate, list[int]]:
     geometry = (
         RoutePoint(lat=0.0, lon=0.0, elevation_m=0.0),
         RoutePoint(lat=0.001, lon=0.001, elevation_m=0.0),
     )
-    return RouteCandidate(geometry=geometry, distance_m=distance_m, elevation_gain_m=0.0), [1, 2]
+    return (
+        RouteCandidate(geometry=geometry, distance_m=distance_m, elevation_gain_m=0.0),
+        node_path if node_path is not None else [1, 2],
+    )
 
 
-def test_tune_waypoints_stops_early_when_distance_plateaus(
+def test_tune_waypoints_stops_early_when_distance_and_path_plateau(
     monkeypatch: pytest.MonkeyPatch, grid_graph: nx.MultiDiGraph, start_node: int
 ) -> None:
-    """Root-cause regression: a template whose synthetic anchor snaps to
-    the same graph node regardless of scale (see `polygon_loop.py`'s
-    `PLATEAU_DISTANCE_EPSILON_M` docs -- a peninsula-tip/graph-boundary
-    orientation) rebuilds the IDENTICAL route on every correction
-    attempt. Distance tuning must detect that plateau and stop instead
-    of burning the full `max_correction_attempts` budget chasing a
-    target this orientation cannot reach at any scale."""
+    """Root-cause regression, case A: a template whose synthetic anchor
+    snaps to the same graph node regardless of scale (see
+    `polygon_loop.py`'s `PLATEAU_DISTANCE_EPSILON_M` docs -- a
+    peninsula-tip/graph-boundary orientation) rebuilds the IDENTICAL
+    route (same node path, same distance) on every correction attempt.
+    Distance tuning must detect that plateau and stop instead of
+    burning the full `max_correction_attempts` budget chasing a target
+    this orientation cannot reach at any scale."""
     node_index = _NodeIndex(grid_graph)
     start_coord = node_coordinate(grid_graph, start_node)
     waypoints_at_scale = _waypoints_at_scale_for(start_coord, TARGET_DISTANCE_M, TEMPLATES[0])
@@ -403,6 +409,52 @@ def test_tune_waypoints_stops_early_when_distance_plateaus(
     # 1 + 4 = 5 attempt budget.
     assert build_calls["n"] < 5
     assert build_calls["n"] <= 2
+
+
+def test_tune_waypoints_does_not_stop_for_matching_distance_alone(
+    monkeypatch: pytest.MonkeyPatch, grid_graph: nx.MultiDiGraph, start_node: int
+) -> None:
+    """Root-cause regression, case B: on a grid-like street network, two
+    genuinely DIFFERENT node paths (different snapped anchors, different
+    routed streets) can coincidentally land on equal or near-equal total
+    length -- distance similarity ALONE must never be treated as a
+    plateau, or a template that's still actively changing topology (and
+    may yet converge) would be cut off prematurely. Every one of the
+    first four attempts here is within `PLATEAU_DISTANCE_EPSILON_M` of
+    the last, but each also has a DIFFERENT node path, so none may be
+    treated as a plateau; the loop must run its full budget and reach
+    -- and retain -- the final, genuinely better/in-tolerance
+    candidate."""
+    node_index = _NodeIndex(grid_graph)
+    start_coord = node_coordinate(grid_graph, start_node)
+    waypoints_at_scale = _waypoints_at_scale_for(start_coord, TARGET_DISTANCE_M, TEMPLATES[0])
+
+    # Near-identical distances (each within 1m of the last) but a
+    # distinct node path every time, followed by a genuinely better,
+    # in-tolerance candidate on a fifth distinct path.
+    distances = [1500.0, 1500.5, 1500.2, 1500.8, 2350.0]
+    node_paths = [[1, 2, 3], [1, 2, 4], [1, 2, 5], [1, 2, 6], [1, 2, 7, 8]]
+    calls = {"n": 0}
+
+    def fake_build(*args: object, **kwargs: object) -> tuple[RouteCandidate, list[int]]:
+        index = min(calls["n"], len(distances) - 1)
+        calls["n"] += 1
+        return _fake_route_candidate(distances[index], node_paths[index])
+
+    monkeypatch.setattr(polygon_loop, "_build_loop_via_waypoints", fake_build)
+
+    result = _tune_waypoints(
+        grid_graph, start_node, node_index, waypoints_at_scale, TARGET_DISTANCE_M,
+        1.0, DEFAULT_TOLERANCE_M, None, max_correction_attempts=4,
+    )
+
+    assert result is not None
+    # All 5 attempts (1 + max_correction_attempts) must run -- a
+    # distance-only plateau check would have wrongly stopped after
+    # attempt 2, well short of the full budget.
+    assert calls["n"] == 5
+    assert result[0].distance_m == distances[-1]
+    assert result[1] == node_paths[-1]
 
 
 def test_tune_waypoints_does_not_stop_early_while_still_converging(

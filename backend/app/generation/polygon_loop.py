@@ -100,15 +100,19 @@ MIN_SCALE = 0.4
 MAX_SCALE = 2.2
 MAX_CORRECTION_ATTEMPTS = 4  # extra rebuilds beyond the initial calibrated attempt
 
-# A rescale attempt whose built distance is within this of the PREVIOUS
-# attempt's, despite scale having changed, means the correction is
-# plateaued rather than converging -- see `_tune_waypoints`'s docstring
-# for the measured mechanism (a synthetic anchor snapping to the same
-# graph node regardless of how much further out it's requested, once
-# the requested point is off-graph). A true plateau reproduces the
-# IDENTICAL route (same snapped nodes -> same shortest path -> same
-# length), so this only needs to be larger than floating-point noise,
-# not a real distance-tuning threshold like `DEFAULT_TOLERANCE_M`.
+# Distance tolerance for the plateau check in `_tune_waypoints`: a
+# rescale attempt whose built distance is within this of the PREVIOUS
+# attempt's is a NECESSARY but not sufficient signal that correction
+# has plateaued -- see `_tune_waypoints`'s docstring for the measured
+# mechanism (a synthetic anchor snapping to the same graph node
+# regardless of how much further out it's requested, once the
+# requested point is off-graph) and why the node path must ALSO match
+# before concluding the route is genuinely unchanged (two different
+# routes can coincidentally land on the same length on a grid-like
+# street network). A true plateau reproduces the IDENTICAL route (same
+# snapped nodes -> same shortest path -> same length), so this only
+# needs to be larger than floating-point noise, not a real
+# distance-tuning threshold like `DEFAULT_TOLERANCE_M`.
 PLATEAU_DISTANCE_EPSILON_M = 1.0
 
 # A genuine 4-leg loop should retrace almost nothing along the way. A
@@ -312,7 +316,7 @@ def _tune_waypoints(
     already built, `None` if nothing was) is returned as-is rather than
     attempting one more rebuild.
 
-    Correction also stops early if a rebuild's distance plateaus (see
+    Correction also stops early if a rebuild PLATEAUS (see
     `PLATEAU_DISTANCE_EPSILON_M`) -- measured root cause: when a
     template's rotation points toward the edge of the routable graph
     (a peninsula tip's water boundary, a park/highway edge with no
@@ -326,12 +330,23 @@ def _tune_waypoints(
     measured hard case) chasing a target this orientation cannot reach
     at any scale; `best` already holds whatever this template's closest
     honest attempt was, unaffected by stopping early.
+
+    A plateau requires BOTH the built distance AND the built node path
+    to match the previous attempt -- distance alone is not sufficient
+    proof: on a grid-like street network, two genuinely DIFFERENT node
+    paths (different snapped anchors, different routed streets) can
+    legitimately land on equal or near-equal total length by
+    coincidence, and that candidate may still be actively converging
+    toward target on a later attempt. Only an identical node path
+    proves the route itself is unchanged -- i.e. that a further
+    rescale is provably wasted rather than just currently unlucky.
     """
     scale = initial_scale
     best: tuple[RouteCandidate, list[int]] | None = None
     best_error = float("inf")
     history: list[tuple[float, float]] = []
     last_distance: float | None = None
+    last_node_path: list[int] | None = None
 
     for _ in range(1 + max_correction_attempts):
         if should_continue is not None and not should_continue():
@@ -342,7 +357,7 @@ def _tune_waypoints(
         if result is None:
             break  # can't build at this scale -- don't force it
 
-        candidate, _node_path = result
+        candidate, node_path = result
         distance = candidate.distance_m
         error = abs(distance - target_distance_m)
         if error < best_error:
@@ -351,9 +366,14 @@ def _tune_waypoints(
         if best_error <= tolerance_m or distance <= 0:
             break
 
-        if last_distance is not None and abs(distance - last_distance) <= PLATEAU_DISTANCE_EPSILON_M:
+        same_distance = (
+            last_distance is not None and abs(distance - last_distance) <= PLATEAU_DISTANCE_EPSILON_M
+        )
+        same_path = last_node_path is not None and node_path == last_node_path
+        if same_distance and same_path:
             break  # plateaued -- further rescaling won't change the built route
         last_distance = distance
+        last_node_path = node_path
 
         if use_secant_refinement:
             history.append((scale, distance))
