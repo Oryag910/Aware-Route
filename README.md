@@ -6,7 +6,7 @@ A Manhattan running-route planner that treats restroom and water stops as hard r
 
 ![Aware Route showing three ranked route alternatives with a matched restroom stop](docs/assets/aware_route-demo.png)
 
-Runners planning a longer route usually cross-reference a map, a facility locator, and a distance estimate by hand. Aware Route folds all three into one request — "5 miles, a restroom around mile 2-4, water around mile 6-8" — and returns several ranked routes that are actually built around those stops, not just filtered for them afterward.
+Runners planning a longer route usually cross-reference a map, a facility locator, and a distance estimate by hand. Aware Route folds all three into one request — "6 miles, a restroom around mile 3-5, water around mile 3-4" — and returns several ranked routes that are actually built around those stops, not just filtered for them afterward.
 
 ## What it does
 
@@ -22,7 +22,7 @@ Runners planning a longer route usually cross-reference a map, a facility locato
 
 **Distance-constrained generation.** Shortest path alone doesn't produce a 5-mile loop, it produces the shortest path. Custom generators build round-trip, out-and-back, and multi-anchor polygon-loop candidates, then a tuning pass pulls each one toward the requested distance, with quality guards that reject candidates that quietly degenerate (e.g. a "round" request collapsing into a near out-and-back).
 
-**Cumulative-mile facility constraints.** The harder problem: "a restroom between mile 2 and 4" only counts if it's encountered on the *finished route*, inside that window, measured by cumulative distance — not proximity to the start. Each facility is projected onto the route's geometry and grouped into distinct encounters, so a facility passed twice on an out-and-back is two real chances, not one. A min-cost bipartite matching then deterministically assigns encounters to requirements. A route is only "fully valid" if every requirement is satisfied this way — partial matches are always labeled honestly, never silently upgraded.
+**Cumulative-mile facility constraints.** The harder problem: "a restroom between mile 2 and 4" only counts if it's encountered on the *finished route*, inside that window, measured by cumulative distance, not proximity to the start. Each facility is projected onto the route's geometry and grouped into distinct encounters, so a facility passed twice on an out-and-back is two real chances, not one. A min-cost bipartite matching then deterministically assigns encounters to requirements. A route is only "fully valid" if every requirement is satisfied this way — partial matches are always labeled honestly, never silently upgraded.
 
 **Ranking and diversity.** The planner scores an ordinary candidate pool against the constraints first, since that's far cheaper than constrained search. When that's not enough, a bounded beam search proposes candidates that route through the required facilities directly. The final alternatives are deduplicated by route-segment overlap so the ranked list isn't three near-identical loops.
 
@@ -111,7 +111,6 @@ GitHub Actions runs `pytest` / `ruff` / `mypy` on the backend and `eslint` / `vi
 - Scoped to Manhattan only.
 - Public restroom data can be incomplete or stale; water data is a static, committed OSM extract.
 - Route distances are tuned within a tolerance, not guaranteed-exact.
-- A single hard facility requirement is recovered reliably (18/18 in the stress benchmark), but 2 or more simultaneous hard requirements aren't solved consistently today — partial routes are always labeled `constraints_satisfied=false` rather than reported as valid. See the [facility benchmark](backend/benchmarks/facilities/report_20260825_184658.md) for the full breakdown.
 - No turn-by-turn navigation or live run tracking.
 
 ## Data & attribution
