@@ -8,14 +8,14 @@ from app.generation.reuse_penalty import (
 
 
 def test_reused_edge_cost_is_multiplied_by_penalty() -> None:
-    weight = _reuse_penalty_weight({frozenset((1, 2))}, penalty=4.0)
+    weight = _reuse_penalty_weight({(1, 2)}, penalty=4.0)
     edge_dict = {0: {"length": 100.0}}
 
     assert weight(1, 2, edge_dict) == 400.0
 
 
 def test_unused_edge_keeps_base_length() -> None:
-    weight = _reuse_penalty_weight({frozenset((1, 2))}, penalty=4.0)
+    weight = _reuse_penalty_weight({(1, 2)}, penalty=4.0)
     edge_dict = {0: {"length": 100.0}}
 
     assert weight(2, 3, edge_dict) == 100.0
@@ -29,7 +29,7 @@ def test_parallel_edges_use_minimum_length() -> None:
 
 
 def test_parallel_edges_minimum_length_is_penalized_when_reused() -> None:
-    weight = _reuse_penalty_weight({frozenset((5, 6))}, penalty=4.0)
+    weight = _reuse_penalty_weight({(5, 6)}, penalty=4.0)
     edge_dict = {0: {"length": 150.0}, 1: {"length": 100.0}}
 
     assert weight(5, 6, edge_dict) == 400.0

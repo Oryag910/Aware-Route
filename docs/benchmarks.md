@@ -61,6 +61,49 @@ A single genuinely-hard requirement is recovered every time. Two or more simulta
 
 **Stratum C — real committed water-dataset coverage.** No synthetic fixture placement at all — the actual bundled OSM water extract, exercised exactly as a live request would. 12/12 scenarios fully constraint-valid, 18/18 individual water requirements found, median latency 6.75 s (max 10.23 s). This is a small, deliberately narrow sample (2 starting areas × 3 distances × 1-2 requirements) — a coverage measurement for that specific sample, not a claim about water-facility coverage everywhere in Manhattan. Restroom data is Supabase-only and isn't represented in any offline benchmark.
 
+## Round-generator migration re-evaluation (2026-08-28)
+
+`ROUND_GENERATOR` selects the generator behind every ordinary round candidate pool -- explicit `shape="round"` and `shape="mix"`'s round component alike (see [`architecture.md`](architecture.md)). This was previously gated on a single, now-stale full-suite p95 latency figure (2.27s) measured before [`FacilitySpatialIndex`](../backend/app/facilities/spatial_index.py) replaced O(facilities x segments) encounter scoring, the actual dominant cost on real multi-facility requests. This section is a fresh, same-commit re-evaluation after that change, run entirely on this repository's `backend/scripts` suites.
+
+**Result: `v1` remains the default.** Polygon's geometry and (after two targeted fixes below) its reliability both clear the bar, but its own full-suite p95 latency still sits above the historical <2.0s raw-generation gate on a small, well-characterized subset of scenarios. Per this project's own change-management standard, that gate is not silently redefined -- the evidence is reported here and the switch (`ROUND_GENERATOR=polygon`) is left for explicit, informed opt-in rather than forced into the default.
+
+**Fixes made along the way, both landed regardless of the default decision:**
+- `app/generation/reuse_penalty.py`'s edge-weight callback (the single hottest function in every reuse-penalized Dijkstra call) was allocating a `frozenset` and a throwaway generator on every edge relaxation; replaced with plain `(min, max)` tuples and a fast-path for the (overwhelmingly common) single-parallel-edge case. This is a correctness-neutral, universal latency win -- it dropped the CURRENT-DEFAULT (v1) full-suite p95 from 1.991s to 1.543s, in addition to helping polygon.
+- Polygon's own candidate ranking (`polygon_loop_pairs`) sorts purely by roundness (isoperimetric quotient), with no forced convergence mechanism (it deliberately never splices a spur, unlike v1). Measured on this commit, that left round-shape "all 3 returned candidates within +/-100m" at only 84.4% (vs v1's 99.4%), concentrated in narrow/constrained local topology (Inwood, Washington Heights, Hamilton Heights) at larger target distances, where several of the 10 templates can't close to within tolerance at any scale in their search bounds. `engine._round_pairs` now ranks polygon's own pool in-tolerance-first, and tops it up with a small (shortfall-sized, not full-pool) v1 fallback whenever polygon alone can't supply `MIN_WITHIN_TOLERANCE_FLOOR` (5, the API's max product count) in-tolerance candidates. This is a targeted top-up, not an unconditional blend -- confirmed to only fire on the same narrow subset of hard scenarios.
+
+**V1 (current default, same commit) vs polygon (opt-in), full 537-scenario suite (`scripts/benchmark_suite.py`, count=5 per scenario):**
+
+| Metric | v1 (default) | polygon (`ROUND_GENERATOR=polygon`) |
+|---|---|---|
+| Scenarios succeeding | 537/537 | 537/537 |
+| Within +/-100m of target | 537/537 (100.0%) | 536/537 (99.8%) |
+| Median latency | 0.318s | 0.487s |
+| p95 latency | **1.543s** (PASS <2.0s) | **2.295s** (FAIL <2.0s) |
+| Max latency | 2.605s | 3.285s |
+
+The p95 gap is concentrated, not diffuse: e.g. the "Battery Park tip, huge target" hard-case scenario (a 12mi round loop from a peninsula tip) takes 1.774s under v1 alone and ~2.5s under polygon alone -- both generators are independently expensive there (large search radius, constrained topology), so the reliability fallback (which pays for both) pushes that specific case to ~4-5s raw generation. This is a handful of scenarios among 537, not a general regression -- median/p90 latency stay excellent under polygon.
+
+**Geometry -- polygon materially better across the round population** (`scripts/benchmark_polygon_loop.py`, 91 matched round/non-amenity scenarios; see the generated report for the full breakdown):
+
+| Metric | v1 median | polygon median |
+|---|---|---|
+| isoperimetric quotient (compactness, higher=rounder) | 0.160 | 0.465 |
+| elongation ratio (lower=more balanced) | 5.13 | 1.41 |
+| radial exposure (lower=stays closer to home) | 0.404 | 0.299 |
+| short_start_return_spur rate | 3.3% | 0.0% |
+
+**Count reliability at the product default (count=3), real `plan_routes` path (`scripts/benchmark_count_reliability.py`):**
+
+| Metric (round shape, count=3) | v1 | polygon |
+|---|---|---|
+| Exact requested count | 100.0% | 100.0% |
+| All returned within +/-100m | 99.4% | **100.0%** |
+| p95 latency | 0.921s | 1.553s |
+
+The count=5 secondary stress figure (not the live product default) shows a smaller residual gap under polygon (90.0% all-within-tolerance vs v1's 98.9%) -- `MIN_WITHIN_TOLERANCE_FLOOR` targets the product default, not this stress case; widening it further would trade more latency for a metric the product doesn't actually serve today.
+
+**Facility benchmark (`scripts/benchmark_facilities.py`)**: unchanged from the documented baseline above -- Stratum A 117/117, Stratum B 18/18 -> 0/18 -> 0/18 -> 0/18 (2.8% partial), Stratum C 12/12 -- confirming the constrained multi-facility planner (which already used polygon's machinery directly, independent of `ROUND_GENERATOR`) and the generic facility-scoring/assignment contract are both untouched by this migration.
+
 ## How to read the numbers
 
 | Claim | Means | Does not mean |

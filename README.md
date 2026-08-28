@@ -52,20 +52,20 @@ The backend ships with deterministic benchmark suites, re-run against the curren
 |---|---|
 | Scenarios with ≥1 route within ±100 m | 537/537 |
 | Disconnected candidates | 0 |
-| Median / p95 generation latency | 0.345 s / 1.805 s |
+| Median / p95 generation latency | 0.318 s / 1.543 s |
 | Scenarios with a meaningfully distinct alternative | 100% |
 | Offline fountain-placement checks | 268/268 |
 
-Full report: [`backend/benchmarks/local/report_20260825_185757.md`](backend/benchmarks/local/report_20260825_185757.md)
+Full report: [`backend/benchmarks/local/report_20260828_125029.md`](backend/benchmarks/local/report_20260828_125029.md)
 
-**Route-count reliability** — at the product default of 3 requested alternatives, across the same 537 scenarios: 100% of scenarios returned exactly 3 routes, and 99.8% had all three within ±100 m of target (99.9% of individual candidates were within tolerance). Full report: [`backend/benchmarks/local/count_reliability_20260825_183354.md`](backend/benchmarks/local/count_reliability_20260825_183354.md)
+**Route-count reliability** — at the product default of 3 requested alternatives, across the same 537 scenarios: 100% of scenarios returned exactly 3 routes, and 99.8% had all three within ±100 m of target (99.9% of individual candidates were within tolerance). Full report: [`backend/benchmarks/local/count_reliability_20260828_121412.md`](backend/benchmarks/local/count_reliability_20260828_121412.md)
 
 **Facility constraint satisfaction** — two suites test the harder problem of routing through specific facilities inside requested mile windows:
 
 - *Mechanism correctness* (117 scenarios, fixtures placed on a route's own geometry so satisfaction is achievable by construction): 117/117 fully constraint-valid across 0 to 6 simultaneous requirements — this proves the encounter-matching and assignment logic is correct, not that any facility layout is solvable.
 - *Real water-data coverage* (12 scenarios against the actual bundled water dataset, no synthetic placement): 12/12 fully satisfied, 18/18 individual requirements found.
 
-A separate stress suite places facilities specifically to force the constrained planner rather than any natural route. It shows the honest limit: a single hard requirement is recovered 18/18 times, but 2 or more simultaneous hard requirements are not reliably solved today — see [Limitations](#limitations). Full report: [`backend/benchmarks/facilities/report_20260825_184658.md`](backend/benchmarks/facilities/report_20260825_184658.md)
+A separate stress suite places facilities specifically to force the constrained planner rather than any natural route. It shows the honest limit: a single hard requirement is recovered 18/18 times, but 2 or more simultaneous hard requirements are not reliably solved today — see [Limitations](#limitations). Full report: [`backend/benchmarks/facilities/report_20260828_130248.md`](backend/benchmarks/facilities/report_20260828_130248.md)
 
 ## Technical docs
 

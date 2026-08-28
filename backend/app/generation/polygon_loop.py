@@ -11,21 +11,24 @@ synthetic rectangle corners (see `polygon_template.py`) snapped onto
 the walk graph. The goal is a broad, closed footprint rather than one
 turnaround and a detour home.
 
-As of PR #16, this generator is fully integrated for explicit
-`shape="round"` local requests, but is OPT-IN, not the default --
-`engine.generate_routes` only calls into this module for "round" (both
-the ordinary and amenity-aware pools, see `polygon_amenity.py`) when
-`ROUND_GENERATOR=polygon` is set explicitly (see
-`engine._round_generator_version`). The default remains V1 (the
-original turnaround-based generator, still fully intact and
-unchanged): the polygon-enabled full-suite p95 latency did not clear
-the project's existing <2.0s benchmark gate, so PR #16 lands the
-validated architecture without flipping production behavior. "mix" and
-"out_and_back" are unaffected by this module and the `ROUND_GENERATOR`
-flag regardless of its value; they always use V1's
-`round_pairs`/`out_and_back_pairs`. See scripts/benchmark_polygon_loop.py
-and scripts/benchmark_polygon_amenity.py for the V1-vs-V2 validation
-this opt-in path was based on.
+As of the round-generator migration (this revision), both explicit
+`shape="round"` and `shape="mix"`'s round component go through ONE
+shared seam (`engine._round_pairs`) that decides V1 vs polygon per
+`ROUND_GENERATOR` -- previously "mix" silently hardcoded V1 regardless
+of the flag, a gap this migration closes. `out_and_back` is untouched
+regardless. Polygon is NOT the default yet, though: see
+`engine._round_generator_version` for the full tradeoff this migration
+measured -- geometry, correctness, and count-reliability all clear the
+bar (the latter only after `engine._round_pairs` added an
+in-tolerance-first ranking + bounded V1 top-up, since this module's
+own "never splice a spur" design can leave narrow/constrained local
+topology at large target distances without enough in-tolerance
+candidates), but the full-suite p95 latency (2.295s, after a real
+`reuse_penalty` optimization) still sits above the project's historical
+p95<2.0s raw-generation gate, concentrated in a handful of extreme
+peninsula-tip/huge-target scenarios. `ROUND_GENERATOR=polygon` opts in
+today; see docs/benchmarks.md for the full same-commit V1-vs-polygon
+numbers this call was based on.
 """
 
 from collections.abc import Callable
