@@ -93,3 +93,44 @@ def template_anchors(
     d = destination_point(c, bearing_cd, height_m)
 
     return (b, c, d)
+
+
+def axis_scaled_template_anchors(
+    start: Coordinate,
+    target_distance_m: float,
+    template: LoopTemplate,
+    height_scale: float,
+    width_scale: float,
+) -> tuple[Coordinate, Coordinate, Coordinate]:
+    """Generalizes `template_anchors` to scale the "height" legs
+    (A->B and C->D) and the "width" leg (B->C) INDEPENDENTLY, instead
+    of by one shared `scale`. `template_anchors(..., scale=s)` is the
+    special case `height_scale=width_scale=s` -- this function computes
+    the same base `width_m`/`height_m` split from `aspect_ratio` and
+    then applies each axis's own multiplier.
+
+    Used by `polygon_loop.py`'s bounded per-axis refinement (see
+    `_tune_template`'s docstring): once a template's ordinary
+    uniform-scale search plateaus outside tolerance, a topology-
+    constrained direction (e.g. a peninsula's water boundary) can be
+    given a SMALLER share of the template's distance budget while the
+    other axis is given a LARGER share, instead of forcing both to the
+    same compromise scale that overshoots one and undershoots the
+    other. Only two fixed, bounded ratio pairs are ever tried (see
+    `AXIS_REFINEMENT_RATIOS`) -- this is not a search function itself.
+    """
+    base_width_m = target_distance_m / (2.0 * (1.0 + template.aspect_ratio))
+    base_height_m = template.aspect_ratio * base_width_m
+    width_m = base_width_m * width_scale
+    height_m = base_height_m * height_scale
+
+    turn = 90.0 if template.direction == "cw" else -90.0
+    bearing_ab = template.rotation_deg
+    bearing_bc = bearing_ab + turn
+    bearing_cd = bearing_bc + turn
+
+    b = destination_point(start, bearing_ab, height_m)
+    c = destination_point(b, bearing_bc, width_m)
+    d = destination_point(c, bearing_cd, height_m)
+
+    return (b, c, d)

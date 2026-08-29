@@ -24,17 +24,25 @@ after `engine._round_pairs` added an in-tolerance-first ranking +
 bounded V1 top-up, since this module's own "never splice a spur"
 design can leave narrow/constrained local topology at large target
 distances without enough in-tolerance candidates). Two gaps remain
-open, though: the full-suite p95 latency (2.241s, after a real
-`reuse_penalty` optimization AND this module's own scale-correction
-plateau fix -- see `PLATEAU_DISTANCE_EPSILON_M`) still sits above the
-project's historical p95<2.0s raw-generation gate, concentrated in a
-handful of extreme peninsula-tip/huge-target scenarios; and separately,
-at the API's supported count=5 (not the product default), round-shape
-reliability is still meaningfully below V1 (~93.3% vs ~99.4%
-all-within-tolerance) -- the in-tolerance-first fallback targets the
-product default, not this wider case, and a diversity-selection fix
-(`orchestration._select_diverse_within_tiers`) closed part but not all
-of this gap. `ROUND_GENERATOR=polygon` opts in today; see
+open, though, even after a further round-trip that added a bounded
+per-axis refinement for topology-constrained templates (see
+`_refine_template_axes`/`axis_scaled_template_anchors`): the full-suite
+p95 latency (~2.3s across repeated same-session runs, after a real
+`reuse_penalty` optimization, this module's own scale-correction
+plateau fix -- see `PLATEAU_DISTANCE_EPSILON_M` -- and the axis
+refinement) still sits above the project's historical p95<2.0s
+raw-generation gate, and is measurably WORSE than the prior round's
+2.241s -- the axis refinement's own bounded extra work still lands on
+the same extreme peninsula-tip/huge-target scenarios that already
+dominate p95, since those rarely have enough natively-converging
+templates to satisfy its early-exit gate. Separately, at the API's
+supported count=5 (not the product default), round-shape reliability
+is still meaningfully below V1 (~93.9% vs ~99.4% all-within-tolerance)
+-- the in-tolerance-first fallback targets the product default, not
+this wider case, and a diversity-selection fix
+(`orchestration._select_diverse_within_tiers`) plus the axis refinement
+each closed part, but not all, of this gap. `ROUND_GENERATOR=polygon`
+opts in today; see
 docs/benchmarks.md for the full same-commit V1-vs-polygon numbers
 both gaps are based on.
 """
@@ -45,7 +53,12 @@ from typing import Any
 
 import numpy as np
 
-from app.generation.polygon_template import TEMPLATES, LoopTemplate, template_anchors
+from app.generation.polygon_template import (
+    TEMPLATES,
+    LoopTemplate,
+    axis_scaled_template_anchors,
+    template_anchors,
+)
 from app.generation.quality import edge_reuse_ratio
 from app.generation.reuse_penalty import edge_pairs, reuse_penalized_path
 from app.generation.shape_metrics import isoperimetric_quotient
@@ -386,6 +399,36 @@ def _tune_waypoints(
     return best
 
 
+# Bounded, fixed ratio pairs tried by `_tune_template`'s per-axis
+# refinement below when a template's uniform-scale search still misses
+# tolerance. Measured, not guessed: grid-testing a range of (height,
+# width) multiplier pairs against known near-miss templates (hard
+# scenarios where 4/5 or 3/5 templates converge -- see PR history)
+# found real, decisive improvements concentrated at exactly these two
+# ratios -- e.g. one Hamilton Heights template's error dropped from
+# 272m to 44m (crossing into tolerance) at (0.6, 1.5), and a different
+# Lower East Side template similarly crossed into tolerance at the
+# same ratio, while an Inwood template instead improved at the inverse
+# (1.5, 0.6). Intermediate ratios (0.7/1.3) found no improvement at
+# all in the same sweep. Only these two are tried -- not a search --
+# to keep the refinement bounded and cheap; which direction (if
+# either) helps depends on which axis a template's local topology
+# constrains, which isn't reliably predictable from snap error alone
+# (also measured), so both are tried and the better result kept.
+AXIS_REFINEMENT_RATIOS: tuple[tuple[float, float], ...] = ((0.6, 1.5), (1.5, 0.6))
+
+# Only attempt the per-axis refinement (see `_refine_template_axes`)
+# when a template's uniform-scale error is within this of target.
+# Measured: every real improvement found in the ratio sweep this
+# constant is based on started from a baseline error at or below
+# ~300m (one axis moderately constrained, not the whole template);
+# templates with errors of several kilometers (e.g. a peninsula-tip
+# orientation where ALL anchors -- not just one axis -- snap far from
+# their synthetic targets) never improved under either ratio, just
+# paying for two wasted graph builds.
+MAX_AXIS_REFINEMENT_ERROR_M = 300.0
+
+
 def _tune_template(
     graph: Any,
     start_node: int,
@@ -408,6 +451,62 @@ def _tune_template(
         graph, start_node, node_index, waypoints_at_scale, target_distance_m,
         initial_scale, tolerance_m, paths,
     )
+
+
+def _refine_template_axes(
+    graph: Any,
+    start_node: int,
+    node_index: _NodeIndex,
+    template: LoopTemplate,
+    start_coord: Coordinate,
+    target_distance_m: float,
+    initial_scale: float,
+    tolerance_m: float,
+    paths: dict[int, list[int]] | None,
+    best: tuple[RouteCandidate, list[int]],
+    best_error: float,
+) -> tuple[tuple[RouteCandidate, list[int]], float]:
+    """Bounded per-axis refinement for ONE template whose uniform-scale
+    result (`best`/`best_error`) still misses `tolerance_m`.
+
+    A single shared `scale` grows/shrinks the "height" legs (A->B,
+    C->D) and the "width" leg (B->C) together. When one axis points
+    toward locally constrained topology (e.g. a peninsula's water
+    boundary) while the other still has room, that shared scale forces
+    both to the same compromise and can't reach target no matter how
+    many correction attempts run (measured: `max_correction_attempts`
+    up to 20 left several real near-miss templates completely
+    unmoved). This tries the template's two fixed asymmetric (height,
+    width) ratios (`AXIS_REFINEMENT_RATIOS`) via
+    `axis_scaled_template_anchors` instead, redistributing the
+    distance budget toward whichever axis actually has room. Each
+    ratio costs exactly one additional build (no further correction
+    search), so this is bounded at 2 extra graph builds -- and is only
+    ever called by `polygon_loop_pairs`'s caller once per template, and
+    only when the scenario doesn't already have enough in-tolerance
+    candidates from the uniform-scale pass (see `polygon_loop_pairs`),
+    so it costs nothing on the common case where a request's ordinary
+    templates already supply enough good candidates."""
+    for height_ratio, width_ratio in AXIS_REFINEMENT_RATIOS:
+        waypoints = axis_scaled_template_anchors(
+            start_coord, target_distance_m, template,
+            initial_scale * height_ratio, initial_scale * width_ratio,
+        )
+        axis_result = _build_loop_via_waypoints(
+            graph, start_node, node_index, list(waypoints), paths,
+        )
+        if axis_result is None:
+            continue
+        axis_candidate, axis_node_path = axis_result
+        if edge_reuse_ratio(axis_node_path) > MAX_EDGE_REUSE_RATIO:
+            continue  # don't trade Polygon's geometry guarantee for distance
+        error = abs(axis_candidate.distance_m - target_distance_m)
+        if error < best_error:
+            best, best_error = axis_result, error
+            if best_error <= tolerance_m:
+                break
+
+    return best, best_error
 
 
 def _calibration_scale_via(
@@ -567,6 +666,16 @@ def polygon_loop_pairs(
     street topology, ...) are silently skipped -- this generator
     degrades to fewer candidates (possibly zero) rather than raising
     when the local topology can't support a four-corner loop.
+
+    A second, GATED pass follows the ordinary uniform-scale pass above:
+    if fewer than `count` templates already landed within `tolerance_m`
+    (only then -- see `_refine_template_axes`), the near-miss templates
+    (in ranked, roundest-first order) get a bounded per-axis
+    refinement attempt, stopping the moment enough in-tolerance
+    candidates exist. This is an "early exit once enough good
+    candidates exist" pattern: the common case, where the uniform-scale
+    pass alone already supplies `count` or more in-tolerance
+    candidates, pays nothing extra at all.
     """
     if target_distance_m <= 0:
         return []
@@ -577,7 +686,7 @@ def polygon_loop_pairs(
         graph, start_node, node_index, start_coord, target_distance_m, paths
     )
 
-    scored: list[tuple[float, RouteCandidate, list[int]]] = []
+    built: list[tuple[LoopTemplate, RouteCandidate, list[int], float]] = []
 
     for template in TEMPLATES:
         result = _tune_template(
@@ -598,9 +707,37 @@ def polygon_loop_pairs(
         if edge_reuse_ratio(node_path) > MAX_EDGE_REUSE_RATIO:
             continue
 
-        quotient = isoperimetric_quotient(candidate.geometry)
-        scored.append((quotient, candidate, node_path))
+        error = abs(candidate.distance_m - target_distance_m)
+        built.append((template, candidate, node_path, error))
 
+    within_tolerance = sum(1 for *_rest, error in built if error <= tolerance_m)
+
+    if within_tolerance < count:
+        # Try the closest-first near-miss templates for axis refinement,
+        # stopping as soon as this scenario has enough in-tolerance
+        # candidates -- never refines every miss unconditionally.
+        built.sort(key=lambda entry: entry[3])
+        refined: list[tuple[LoopTemplate, RouteCandidate, list[int], float]] = []
+        for template, candidate, node_path, error in built:
+            if (
+                within_tolerance < count
+                and tolerance_m < error <= MAX_AXIS_REFINEMENT_ERROR_M
+            ):
+                (candidate, node_path), new_error = _refine_template_axes(
+                    graph, start_node, node_index, template, start_coord,
+                    target_distance_m, calibration, tolerance_m, paths,
+                    (candidate, node_path), error,
+                )
+                if new_error <= tolerance_m and error > tolerance_m:
+                    within_tolerance += 1
+                error = new_error
+            refined.append((template, candidate, node_path, error))
+        built = refined
+
+    scored = [
+        (isoperimetric_quotient(candidate.geometry), candidate, node_path)
+        for _template, candidate, node_path, _error in built
+    ]
     scored.sort(key=lambda entry: entry[0], reverse=True)
     return [(candidate, node_path) for _, candidate, node_path in scored[:count]]
 

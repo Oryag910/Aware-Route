@@ -492,6 +492,190 @@ def test_tune_waypoints_does_not_stop_early_while_still_converging(
     assert result[0].distance_m == distances[-1]  # closest to target, kept as best
 
 
+# ---------------------------------------------------------------------------
+# Per-axis refinement (_refine_template_axes / polygon_loop_pairs gating):
+# a template whose uniform-scale search misses tolerance because one axis
+# ("height" legs A->B/C->D vs the "width" leg B->C) is locally
+# topology-constrained while the other has room. See docs/benchmarks.md for
+# the measured evidence this is based on.
+# ---------------------------------------------------------------------------
+
+
+def test_refine_template_axes_adopts_an_improving_ratio_and_stops_early(
+    monkeypatch: pytest.MonkeyPatch, grid_graph: nx.MultiDiGraph, start_node: int
+) -> None:
+    """When the first of the two fixed axis ratios already lands within
+    tolerance, the refinement adopts it and does not bother trying the
+    second -- bounded, not a search."""
+    node_index = _NodeIndex(grid_graph)
+    start_coord = node_coordinate(grid_graph, start_node)
+    template = TEMPLATES[0]
+
+    baseline_error = 250.0
+    baseline = _fake_route_candidate(TARGET_DISTANCE_M - baseline_error)
+
+    calls = {"n": 0}
+
+    def fake_build(*args: object, **kwargs: object) -> tuple[RouteCandidate, list[int]]:
+        calls["n"] += 1
+        return _fake_route_candidate(TARGET_DISTANCE_M - 20.0, [10, 11, 12])
+
+    monkeypatch.setattr(polygon_loop, "_build_loop_via_waypoints", fake_build)
+
+    (candidate, node_path), error = polygon_loop._refine_template_axes(
+        grid_graph, start_node, node_index, template, start_coord, TARGET_DISTANCE_M,
+        1.0, DEFAULT_TOLERANCE_M, None, baseline, baseline_error,
+    )
+
+    assert error <= DEFAULT_TOLERANCE_M
+    assert error < baseline_error
+    assert calls["n"] == 1  # stopped after the first ratio already succeeded
+
+
+def test_refine_template_axes_keeps_baseline_when_neither_ratio_helps(
+    monkeypatch: pytest.MonkeyPatch, grid_graph: nx.MultiDiGraph, start_node: int
+) -> None:
+    """If neither of the two fixed ratios improves on the uniform-scale
+    result, the original `best`/`best_error` is returned unchanged --
+    the refinement can never make a template's own result worse."""
+    node_index = _NodeIndex(grid_graph)
+    start_coord = node_coordinate(grid_graph, start_node)
+    template = TEMPLATES[0]
+
+    baseline_error = 250.0
+    baseline = _fake_route_candidate(TARGET_DISTANCE_M - baseline_error)
+
+    calls = {"n": 0}
+
+    def fake_build(*args: object, **kwargs: object) -> tuple[RouteCandidate, list[int]]:
+        calls["n"] += 1
+        return _fake_route_candidate(TARGET_DISTANCE_M - 900.0)  # worse than baseline
+
+    monkeypatch.setattr(polygon_loop, "_build_loop_via_waypoints", fake_build)
+
+    result, error = polygon_loop._refine_template_axes(
+        grid_graph, start_node, node_index, template, start_coord, TARGET_DISTANCE_M,
+        1.0, DEFAULT_TOLERANCE_M, None, baseline, baseline_error,
+    )
+
+    assert result == baseline
+    assert error == baseline_error
+    assert calls["n"] == 2  # both ratios tried (bounded), neither adopted
+
+
+def test_refine_template_axes_rejects_high_edge_reuse_even_if_closer(
+    monkeypatch: pytest.MonkeyPatch, grid_graph: nx.MultiDiGraph, start_node: int
+) -> None:
+    """A closer-to-target axis-refined candidate must still be rejected
+    if it degenerates into a near out-and-back (high edge reuse) --
+    Polygon's geometry guarantee is never traded away for distance."""
+    node_index = _NodeIndex(grid_graph)
+    start_coord = node_coordinate(grid_graph, start_node)
+    template = TEMPLATES[0]
+
+    baseline_error = 250.0
+    baseline = _fake_route_candidate(TARGET_DISTANCE_M - baseline_error)
+
+    # A degenerate out-and-back-like path: walks out and immediately
+    # back over the same edges (edge_reuse_ratio well above
+    # MAX_EDGE_REUSE_RATIO), despite landing exactly on target distance.
+    degenerate_path = [1, 2, 3, 2, 1]
+
+    def fake_build(*args: object, **kwargs: object) -> tuple[RouteCandidate, list[int]]:
+        return _fake_route_candidate(TARGET_DISTANCE_M, degenerate_path)
+
+    monkeypatch.setattr(polygon_loop, "_build_loop_via_waypoints", fake_build)
+    assert edge_reuse_ratio(degenerate_path) > MAX_EDGE_REUSE_RATIO
+
+    result, error = polygon_loop._refine_template_axes(
+        grid_graph, start_node, node_index, template, start_coord, TARGET_DISTANCE_M,
+        1.0, DEFAULT_TOLERANCE_M, None, baseline, baseline_error,
+    )
+
+    assert result == baseline
+    assert error == baseline_error
+
+
+def test_polygon_loop_pairs_skips_refinement_when_enough_already_converge(
+    monkeypatch: pytest.MonkeyPatch, grid_graph: nx.MultiDiGraph, start_node: int
+) -> None:
+    """The gated refinement must never run at all when the ordinary
+    uniform-scale pass already supplies `count` in-tolerance
+    candidates -- normal/easy scenarios (the overwhelming majority)
+    must pay nothing extra for this mechanism."""
+
+    def fake_tune_template(
+        graph: object, start_node: object, node_index: object, template: object,
+        start_coord: object, target_distance_m: float, initial_scale: object,
+        tolerance_m: object, paths: object,
+    ) -> tuple[RouteCandidate, list[int]]:
+        return _fake_route_candidate(target_distance_m)  # every template dead on target
+
+    def fake_refine(*args: object, **kwargs: object) -> object:
+        raise AssertionError("axis refinement must not run when unnecessary")
+
+    monkeypatch.setattr(polygon_loop, "_tune_template", fake_tune_template)
+    monkeypatch.setattr(polygon_loop, "_refine_template_axes", fake_refine)
+
+    pairs = polygon_loop_pairs(grid_graph, start_node, TARGET_DISTANCE_M, count=3)
+
+    assert len(pairs) == 3
+
+
+def test_polygon_loop_pairs_refines_near_misses_only_until_count_is_met(
+    monkeypatch: pytest.MonkeyPatch, grid_graph: nx.MultiDiGraph, start_node: int
+) -> None:
+    """When the uniform-scale pass alone falls short of `count`
+    in-tolerance candidates, the gated refinement is attempted on the
+    near-miss templates -- but stops calling it once enough
+    in-tolerance candidates exist, rather than refining every miss
+    unconditionally."""
+    template_index = {template: i for i, template in enumerate(TEMPLATES)}
+
+    def fake_tune_template(
+        graph: object, start_node: object, node_index: object, template: LoopTemplate,
+        start_coord: object, target_distance_m: float, initial_scale: object,
+        tolerance_m: object, paths: object,
+    ) -> tuple[RouteCandidate, list[int]]:
+        idx = template_index[template]
+        if idx < 2:
+            return _fake_route_candidate(target_distance_m, [idx, idx + 100])
+        # A near-miss within MAX_AXIS_REFINEMENT_ERROR_M for every other template.
+        return _fake_route_candidate(target_distance_m - 150.0, [idx, idx + 200])
+
+    refine_calls = {"n": 0}
+
+    def fake_refine(
+        graph: object, start_node: object, node_index: object, template: object,
+        start_coord: object, target_distance_m: object, initial_scale: object,
+        tolerance_m: object, paths: object,
+        best: tuple[RouteCandidate, list[int]], best_error: float,
+    ) -> tuple[tuple[RouteCandidate, list[int]], float]:
+        refine_calls["n"] += 1
+        return best, best_error  # no improvement -- isolates the gating behavior
+
+    monkeypatch.setattr(polygon_loop, "_tune_template", fake_tune_template)
+    monkeypatch.setattr(polygon_loop, "_refine_template_axes", fake_refine)
+
+    polygon_loop_pairs(grid_graph, start_node, TARGET_DISTANCE_M, count=3)
+
+    # Only 2 templates converge natively (< count=3), so refinement must
+    # have been attempted at least once.
+    assert refine_calls["n"] > 0
+
+
+def test_polygon_loop_pairs_deterministic_with_refinement_active(
+    grid_graph: nx.MultiDiGraph, start_node: int
+) -> None:
+    """Same inputs must produce the same route even when the gated
+    refinement pass runs (real graph, no mocking, count high enough
+    that refinement is plausible)."""
+    first = polygon_loop_pairs(grid_graph, start_node, TARGET_DISTANCE_M, COUNT)
+    second = polygon_loop_pairs(grid_graph, start_node, TARGET_DISTANCE_M, COUNT)
+
+    assert first == second
+
+
 def test_calibration_scale_via_expired_returns_neutral_scale(
     grid_graph: nx.MultiDiGraph, start_node: int
 ) -> None:

@@ -1,6 +1,11 @@
 from math import isclose
 
-from app.generation.polygon_template import TEMPLATES, LoopTemplate, template_anchors
+from app.generation.polygon_template import (
+    TEMPLATES,
+    LoopTemplate,
+    axis_scaled_template_anchors,
+    template_anchors,
+)
 from app.routing.geometry import bearing_deg, destination_point, haversine_m
 from app.routing.provider import Coordinate
 
@@ -136,5 +141,55 @@ def test_deterministic_output() -> None:
 
     first = template_anchors(START, TARGET_DISTANCE_M, template)
     second = template_anchors(START, TARGET_DISTANCE_M, template)
+
+    assert first == second
+
+
+# ---------------------------------------------------------------------------
+# axis_scaled_template_anchors -- the per-axis refinement's geometry helper
+# ---------------------------------------------------------------------------
+
+
+def test_axis_scaled_matches_template_anchors_when_scales_are_equal() -> None:
+    """`height_scale == width_scale == s` must be identical to
+    `template_anchors(..., scale=s)` -- the uniform-scale case is a
+    special case of the axis-scaled one, not a separate code path."""
+    template = LoopTemplate(rotation_deg=45.0, aspect_ratio=1.2, direction="cw")
+
+    uniform = template_anchors(START, TARGET_DISTANCE_M, template, scale=1.3)
+    axis_scaled = axis_scaled_template_anchors(
+        START, TARGET_DISTANCE_M, template, height_scale=1.3, width_scale=1.3
+    )
+
+    assert uniform == axis_scaled
+
+
+def test_axis_scaled_independently_scales_height_and_width_legs() -> None:
+    """Shrinking `height_scale` alone must shrink ONLY the A->B/C->D
+    ("height") legs, leaving the B->C ("width") leg exactly as it would
+    be under `width_scale` alone -- this independence is the entire
+    point of the refinement (redistributing budget between axes
+    without a single shared knob)."""
+    template = LoopTemplate(rotation_deg=0.0, aspect_ratio=1.0, direction="cw")
+
+    baseline_b, baseline_c, _ = template_anchors(START, TARGET_DISTANCE_M, template, scale=1.0)
+    baseline_height = haversine_m(START, baseline_b)
+    baseline_width = haversine_m(baseline_b, baseline_c)
+
+    b, c, _ = axis_scaled_template_anchors(
+        START, TARGET_DISTANCE_M, template, height_scale=0.6, width_scale=1.5
+    )
+    height = haversine_m(START, b)
+    width = haversine_m(b, c)
+
+    assert isclose(height, baseline_height * 0.6, rel_tol=1e-6)
+    assert isclose(width, baseline_width * 1.5, rel_tol=1e-6)
+
+
+def test_axis_scaled_deterministic_output() -> None:
+    template = LoopTemplate(rotation_deg=30.0, aspect_ratio=1.2, direction="ccw")
+
+    first = axis_scaled_template_anchors(START, TARGET_DISTANCE_M, template, 0.6, 1.5)
+    second = axis_scaled_template_anchors(START, TARGET_DISTANCE_M, template, 0.6, 1.5)
 
     assert first == second
