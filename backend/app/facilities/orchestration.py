@@ -161,18 +161,30 @@ def natural_match_pool(
     candidates all survive construction and diversity filtering. Any
     real requirement widens the pool further so natural matching has
     enough candidates to find one that already happens to pass every
-    requested stop."""
+    requested stop.
+
+    `count` here is the USER'S real requested final count -- the
+    inflated `pool_size` below (e.g. 9 or 12 for a real `count=3` ask)
+    is passed to `generate_routes` as its candidate-construction size,
+    but `count` itself is passed separately as `requested_count` so the
+    ordinary round-generator seam (`ROUND_GENERATOR=auto`, see
+    `engine._round_generator_version`) picks a generator based on what
+    the user actually asked for, not how many candidates were
+    internally over-requested for this function's own diversity
+    selection."""
     if not requirements:
         pool_size = min(
             NO_FACILITY_POOL_CEILING, max(count * NO_FACILITY_POOL_MULTIPLIER, count)
         )
         return generate_routes(
-            graph, start, target_distance_m, shape, pool_size, result_count=pool_size
+            graph, start, target_distance_m, shape, pool_size,
+            result_count=pool_size, requested_count=count,
         )
 
     pool_size = min(NATURAL_POOL_CEILING, max(count * NATURAL_POOL_MULTIPLIER, count))
     return generate_routes(
-        graph, start, target_distance_m, shape, pool_size, result_count=pool_size
+        graph, start, target_distance_m, shape, pool_size,
+        result_count=pool_size, requested_count=count,
     )
 
 

@@ -55,7 +55,54 @@ A shortest path answers "how do I get from A to B," not "give me a 5-mile loop."
 
 - **Round** and **out-and-back** candidates come from turnaround-based generators that pick diverse bearings around the start point, then a tuning pass (`tune_generator_pairs_to_target`) binary-searches a radius scale and splices a short out-and-back spur to close any remaining gap, targeting a ±100 m distance tolerance.
 - A **mixed** request pools both round and out-and-back candidates together.
-- A newer multi-anchor polygon-loop generator produces geometrically cleaner round routes than the turnaround-based one (broader footprint, no elongated corridor shape, no tuner-generated start-return spur). It's selected by the `ROUND_GENERATOR` environment variable (`v1`, the default, or `polygon`) applied consistently everywhere an ordinary round pool is built — explicit `shape="round"` and `shape="mix"`'s round component alike. It isn't the default yet: at the product's count=3 default it matches or beats V1 on every measured gate, but two gaps remain unresolved even after a targeted follow-up fixed a scale-correction plateau (wasted latency) and a diversity-selection bug (silently swapping a passing candidate for a failing one) — full-suite p95 latency (2.241s, above this project's historical <2.0s raw-generation gate) and, separately, round-shape reliability at the API's supported count=5 (~93.3% all-within-tolerance vs V1's ~99.4%) — see [`benchmarks.md`](benchmarks.md#polygon-convergence-follow-up-2026-08-28) for the exact same-commit evidence behind both and what was ruled out along the way. It's used unconditionally today inside the constrained multi-facility round planner (below), independent of this flag, where routing through required stops matters more than shaving latency on the ordinary case.
+- A newer multi-anchor polygon-loop generator produces geometrically cleaner round routes than the turnaround-based one (broader footprint, no elongated corridor shape, no tuner-generated start-return spur). Two independent follow-ups closed most of the gap between it and the older turnaround-based generator ("v1") but never fully closed either of two measured gates when forcing ONE generator to cover every supported count: v1 has the better full-suite p95 latency and the better round-shape reliability at the API's max count=5 (~99.4% all-within-tolerance), while polygon has dramatically better geometry and matches or beats v1 on every gate at the product's actual count=3 default (100% exact-count, 100% all-within-tolerance, p95 ~1.4-1.5s). See [`benchmarks.md`](benchmarks.md#polygon-convergence-follow-up-2026-08-28) for that same-commit evidence and what was ruled out along the way (a third, closed-but-unmerged experiment tried per-leg template refinement to close the count=5 gap directly; it helped reliability slightly but made full-suite p95 worse, so it wasn't merged).
+- Rather than pick one generator to lose on some request shape, an adaptive policy (`ROUND_GENERATOR=auto`, the default) selects the generator actually validated for the request's own count — see the decision tree and count-flow diagram below, and [`benchmarks.md`](benchmarks.md#adaptive-round-generator-policy-pr-29-2026-08-28) for the fresh same-commit evidence the `auto` policy itself was benchmarked on (not just polygon or v1 in isolation). It's used unconditionally today inside the constrained multi-facility round planner (below), independent of this flag, where routing through required stops matters more than shaving latency on the ordinary case.
+
+### Requested count vs. candidate pool size
+
+Three different integers flow through candidate generation, and conflating them was a real bug this project fixed (PR #29) rather than a hypothetical risk:
+
+```
+RouteRequest.count (1-5, default 3, the user's real ask)
+        │
+        ▼
+facilities.orchestration.natural_match_pool
+        │  inflates to an OVERCOMPLETE pool for its own
+        │  downstream diversity/portfolio selection:
+        │    no facilities: pool = min(10, count * 3)   → 9 for count=3
+        │    with facilities: pool = min(16, count * 4)  → 12 for count=3
+        ▼
+generate_routes(..., count=pool_size, requested_count=<the original count>)
+        │
+        ├─→ `count` (pool_size)   → candidate CONSTRUCTION size only
+        │                            (how many candidates to build; also
+        │                            feeds MIN_WITHIN_TOLERANCE_FLOOR's
+        │                            v1-fallback top-up math — unchanged)
+        │
+        └─→ `requested_count`     → GENERATOR SELECTION only
+                                     (engine._round_generator_version;
+                                     NEVER the inflated pool size)
+        ▼
+diversity/tier selection trims back down toward the user's real count
+```
+
+Before PR #29, `generate_routes` only ever saw `pool_size` — a generator selector keyed on it would have silently picked v1 for the product's real count=3 default the instant facility requirements were present (pool_size=12), even though polygon is what's validated at count=3. `requested_count` exists specifically to prevent that: it always carries the user's real `RouteRequest.count`, independent of whatever pool size is being constructed for internal diversity purposes. Direct/internal callers that omit `requested_count` (e.g. `generate_candidates`, benchmark scripts) get it defaulted to their own `count` argument, preserving prior behavior.
+
+### Adaptive selector decision tree
+
+```
+ROUND_GENERATOR env var
+        │
+        ├─ "polygon"        → always polygon, any requested_count
+        ├─ "v1"              → always v1, any requested_count
+        ├─ "auto" (default) → requested_count <= 3 ? polygon : v1
+        └─ unset/invalid     → falls back to "v1"
+                                (auto is never silently enabled by a typo;
+                                only "auto" — including the bare default
+                                itself — reads requested_count at all)
+```
+
+`requested_count<=3` was chosen as the polygon threshold because count=3 (the product default) is the only count with full, repeated, same-commit validation across three prior benchmark rounds; count=4 has no separate evidence and is grouped with count=5 rather than assumed. Applies identically to explicit `shape="round"` and `shape="mix"`'s round component (`engine._round_pairs`) — `shape="out_and_back"` is untouched by this flag entirely.
 
 The generic scorer uses route quality only as its final soft ranking term, after hard-constraint status and distance error. That quality term favors less edge reuse and a higher pedestrian-way share; out-and-back routes are exempted from the reuse penalty because retracing is inherent to that shape.
 
