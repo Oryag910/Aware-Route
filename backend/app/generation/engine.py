@@ -29,11 +29,12 @@ def _round_generator_version(requested_count: int) -> RoundGenerator:
 
     - `"polygon"`: always polygon, regardless of `requested_count`.
     - `"v1"`: always v1, regardless of `requested_count`.
-    - `"auto"`: polygon when
-      `requested_count <= AUTO_POLYGON_MAX_REQUESTED_COUNT`, v1
+    - `"auto"` (the default -- `os.environ.get("ROUND_GENERATOR", "auto")`
+      below -- so an UNSET `ROUND_GENERATOR` means auto, not v1): polygon
+      when `requested_count <= AUTO_POLYGON_MAX_REQUESTED_COUNT`, v1
       otherwise -- see that constant for why 3 is the line.
-    - anything else (unset, or a typo/invalid value): falls back to
-      `"v1"`, the long-proven-safe generator, so a misconfigured
+    - anything else (an explicitly invalid value, e.g. a typo): falls
+      back to `"v1"`, the long-proven-safe generator, so a misconfigured
       environment can never accidentally enable an unvalidated path.
 
     Applies everywhere an ORDINARY round candidate pool is built for the
@@ -91,7 +92,7 @@ def _round_generator_version(requested_count: int) -> RoundGenerator:
         return "v1"
     if value == "auto":
         return "polygon" if requested_count <= AUTO_POLYGON_MAX_REQUESTED_COUNT else "v1"
-    return "v1"  # unset or invalid -- never silently enable an unvalidated path
+    return "v1"  # explicitly invalid value -- never silently enable an unvalidated path
 
 
 # Below this many of polygon's own within-tolerance candidates, top up

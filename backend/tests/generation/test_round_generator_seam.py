@@ -304,9 +304,10 @@ def test_polygon_healthy_tolerance_yield_skips_v1_fallback(
 # ROUND_GENERATOR="auto": selects the generator off the user's REAL
 # requested final count, never the (often much larger) internal
 # candidate-pool size -- see `engine._round_generator_version`'s
-# docstring. `ROUND_GENERATOR` default remains "v1" here; these tests
-# always set the env var explicitly to exercise "auto" until benchmarks
-# (docs/benchmarks.md) justify flipping the no-env default.
+# docstring. `"auto"` is the no-env default (see the dedicated no-env
+# tests above); the tests below set the env var explicitly to exercise
+# "auto"'s selection logic directly, independent of default-value
+# bookkeeping.
 # ---------------------------------------------------------------------------
 
 
