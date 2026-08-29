@@ -35,17 +35,17 @@ class RouteRequest(BaseModel):
     run_time: datetime | None = None
 ```
 
-Each `FacilityRequirementIn` is typed (`restroom` or `water`) and carries its own cumulative-mile window (`min_distance_m` / `max_distance_m`) — a request can ask for several requirements at once, each with an independent window, e.g. a restroom around mile 2-4 and water around mile 6-8. There is no elevation-preference or workout-type input; the product doesn't expose either today.
+Each `FacilityRequirementIn` is typed (`restroom` or `water`) and carries its own cumulative-mile window (`min_distance_m` / `max_distance_m`), so a request can ask for several requirements at once, each with an independent window, e.g. a restroom around mile 2-4 and water around mile 6-8. There is no elevation-preference or workout-type input; the product doesn't expose either today.
 
-A deprecated `/routes/with-restroom` endpoint still exists for backward compatibility with an older single-restroom-range contract and isn't called by the current frontend — see [`deployment.md`](deployment.md) for its one remaining role.
+A deprecated `/routes/with-restroom` endpoint still exists for backward compatibility with an older single-restroom-range contract and isn't called by the current frontend; see [`deployment.md`](deployment.md) for its one remaining role.
 
 ## Manhattan walk graph
 
 The routable network is a pedestrian graph built once, offline, from OpenStreetMap. It's built with [OSMnx](https://osmnx.readthedocs.io/)'s `network_type="walk"` preset, which retrieves the public walkable network rather than an unrestricted street graph. The result is committed to the repo as a versioned artifact (`backend/data/manhattan_walk_graph.v1.pkl`) with a manifest (`manhattan_walk_graph.v1.manifest.json`) recording its SHA-256, node/edge counts, schema version, and the OSMnx/NetworkX versions it was built with.
 
-The app loads this artifact once at startup rather than rebuilding or fetching a graph per request — at roughly 36k nodes and 115k edges, that's the difference between a request paying network/build latency and paying none. On load, the manifest's SHA-256 and node/edge counts are re-verified against the actual file (within a small tolerance) and a shortest-path smoke test runs before the graph is considered ready; a corrupted or mismatched artifact fails loudly instead of serving silently-wrong routes.
+The app loads this artifact once at startup rather than rebuilding or fetching a graph per request. At roughly 36k nodes and 115k edges, that's the difference between a request paying network/build latency and paying none. On load, the manifest's SHA-256 and node/edge counts are re-verified against the actual file (within a small tolerance) and a shortest-path smoke test runs before the graph is considered ready, so a corrupted or mismatched artifact fails loudly instead of serving wrong routes.
 
-Shortest-path and cumulative-distance computations run directly on this graph with NetworkX's Dijkstra implementation (`single_source_dijkstra`, `shortest_path`, edge weight `"length"`). There's no external directions API in this path — see [Important design decisions](#important-design-decisions).
+Shortest-path and cumulative-distance computations run directly on this graph with NetworkX's Dijkstra implementation (`single_source_dijkstra`, `shortest_path`, edge weight `"length"`). There's no external directions API in this path; see [Important design decisions](#important-design-decisions).
 
 Committed data provenance and licensing are documented separately in [`backend/data/README.md`](../backend/data/README.md) and [`DATA_LICENSE.md`](../DATA_LICENSE.md).
 
@@ -55,12 +55,12 @@ A shortest path answers "how do I get from A to B," not "give me a 5-mile loop."
 
 - **Round** and **out-and-back** candidates come from turnaround-based generators that pick diverse bearings around the start point, then a tuning pass (`tune_generator_pairs_to_target`) binary-searches a radius scale and splices a short out-and-back spur to close any remaining gap, targeting a ±100 m distance tolerance.
 - A **mixed** request pools both round and out-and-back candidates together.
-- A newer multi-anchor polygon-loop generator produces geometrically cleaner round routes than the turnaround-based one (broader footprint, no elongated corridor shape, no tuner-generated start-return spur). Two independent follow-ups closed most of the gap between it and the older turnaround-based generator ("v1") but never fully closed either of two measured gates when forcing ONE generator to cover every supported count: v1 has the better full-suite p95 latency and the better round-shape reliability at the API's max count=5 (~99.4% all-within-tolerance), while polygon has dramatically better geometry and matches or beats v1 on every gate at the product's actual count=3 default (100% exact-count, 100% all-within-tolerance, p95 ~1.4-1.5s). See [`benchmarks.md`](benchmarks.md#polygon-convergence-follow-up-2026-08-28) for that same-commit evidence and what was ruled out along the way (a third, closed-but-unmerged experiment tried per-leg template refinement to close the count=5 gap directly; it helped reliability slightly but made full-suite p95 worse, so it wasn't merged).
-- Rather than pick one generator to lose on some request shape, an adaptive policy (`ROUND_GENERATOR=auto`, the default) selects the generator actually validated for the request's own count — see the decision tree and count-flow diagram below, and [`benchmarks.md`](benchmarks.md#adaptive-round-generator-policy-pr-29-2026-08-28) for the fresh same-commit evidence the `auto` policy itself was benchmarked on (not just polygon or v1 in isolation). It's used unconditionally today inside the constrained multi-facility round planner (below), independent of this flag, where routing through required stops matters more than shaving latency on the ordinary case.
+- A second, multi-anchor polygon-loop generator produces geometrically cleaner round routes (broader footprint, no elongated corridor shape, no tuner-generated start-return spur) than the original turnaround-based one ("v1"). Neither wins outright: v1 has better full-suite p95 latency and better round-shape reliability at the API's max count=5 (~99.4% all-within-tolerance), while polygon has better geometry and matches or beats v1 at the product's count=3 default (100% exact-count, 100% all-within-tolerance, p95 ~1.4-1.5s). See [`benchmarks.md`](benchmarks.md#polygon-convergence-follow-up-2026-08-28) for the measurements.
+- `ROUND_GENERATOR=auto` (the default) picks between them per request: polygon for requested counts up to 3, v1 above that, matching each generator to the count it's actually validated for. See the decision tree and count-flow diagram below, and [`benchmarks.md`](benchmarks.md#adaptive-round-generator-policy-pr-29-2026-08-28) for benchmarks of the `auto` policy itself. The constrained multi-facility round planner (below) uses polygon unconditionally, independent of this flag, since routing through required stops matters more there than latency.
 
 ### Requested count vs. candidate pool size
 
-Three different integers flow through candidate generation, and conflating them was a real bug this project fixed (PR #29) rather than a hypothetical risk:
+Three different integers flow through candidate generation. Conflating them was a real bug, fixed in PR #29:
 
 ```
 RouteRequest.count (1-5, default 3, the user's real ask)
@@ -74,49 +74,47 @@ facilities.orchestration.natural_match_pool
         ▼
 generate_routes(..., count=pool_size, requested_count=<the original count>)
         │
-        ├─→ `count` (pool_size)   → candidate CONSTRUCTION size only
+        ├─→ `count` (pool_size)   → candidate construction size only
         │                            (how many candidates to build; also
         │                            feeds MIN_WITHIN_TOLERANCE_FLOOR's
-        │                            v1-fallback top-up math — unchanged)
+        │                            v1-fallback top-up math, unchanged)
         │
-        └─→ `requested_count`     → GENERATOR SELECTION only
-                                     (engine._round_generator_version;
-                                     NEVER the inflated pool size)
+        └─→ `requested_count`     → generator selection only
+                                     (engine._round_generator_version,
+                                     independent of the pool size)
         ▼
 diversity/tier selection trims back down toward the user's real count
 ```
 
-Before PR #29, `generate_routes` only ever saw `pool_size` — a generator selector keyed on it would have silently picked v1 for the product's real count=3 default the instant facility requirements were present (pool_size=12), even though polygon is what's validated at count=3. `requested_count` exists specifically to prevent that: it always carries the user's real `RouteRequest.count`, independent of whatever pool size is being constructed for internal diversity purposes. Direct/internal callers that omit `requested_count` (e.g. `generate_candidates`, benchmark scripts) get it defaulted to their own `count` argument, preserving prior behavior.
+Before PR #29, `generate_routes` only ever saw `pool_size`. A generator selector keyed on it would have picked v1 for the product's count=3 default whenever facility requirements were present (pool_size=12), even though polygon is what's validated at count=3. `requested_count` carries the user's real `RouteRequest.count`, independent of whatever pool size is being constructed for internal diversity purposes. Direct callers that omit `requested_count` (e.g. `generate_candidates`, benchmark scripts) default it to their own `count` argument.
 
 ### Adaptive selector decision tree
 
 ```
 ROUND_GENERATOR env var
         │
-        ├─ "polygon"        → always polygon, any requested_count
-        ├─ "v1"              → always v1, any requested_count
-        ├─ "auto" (default) → requested_count <= 3 ? polygon : v1
-        └─ unset/invalid     → falls back to "v1"
-                                (auto is never silently enabled by a typo;
-                                only "auto" — including the bare default
-                                itself — reads requested_count at all)
+        ├─ "polygon"          → always polygon, any requested_count
+        ├─ "v1"                → always v1, any requested_count
+        ├─ "auto" (default,
+        │   including unset)   → requested_count <= 3 ? polygon : v1
+        └─ invalid value       → falls back to "v1"
 ```
 
-`requested_count<=3` was chosen as the polygon threshold because count=3 (the product default) is the only count with full, repeated, same-commit validation across three prior benchmark rounds; count=4 has no separate evidence and is grouped with count=5 rather than assumed. Applies identically to explicit `shape="round"` and `shape="mix"`'s round component (`engine._round_pairs`) — `shape="out_and_back"` is untouched by this flag entirely.
+`requested_count<=3` was chosen as the threshold because count=3, the product default, is the only count with repeated same-commit validation; count=4 has no separate evidence and is grouped with count=5. Applies identically to explicit `shape="round"` and `shape="mix"`'s round component (`engine._round_pairs`); `shape="out_and_back"` is untouched by this flag.
 
 The generic scorer uses route quality only as its final soft ranking term, after hard-constraint status and distance error. That quality term favors less edge reuse and a higher pedestrian-way share; out-and-back routes are exempted from the reuse penalty because retracing is inherent to that shape.
 
 ## Facility constraints
 
-This is the harder problem: "a restroom between mile 2 and 4" only counts if it's actually encountered on the *finished* route, inside that window, measured by cumulative distance from the start — not by how close a facility happens to be to the route in a straight line.
+The harder part: "a restroom between mile 2 and 4" only counts if it's actually encountered on the *finished* route, inside that window, measured by cumulative distance from the start, not by how close a facility happens to be in a straight line.
 
-1. **Conditional loading.** The facility catalog only fetches the kinds actually requested — a no-facility or water-only request never queries Supabase restrooms, and a request with no water requirement never loads the water dataset.
-2. **Natural match first.** The planner scores an ordinary candidate pool (the same generation above) against the requirements first. Constrained planners only run when requirements are present *and* fewer than the requested count of candidates from that pool are fully valid — avoiding constrained search whenever the ordinary pool already satisfies the request.
+1. **Conditional loading.** The facility catalog only fetches the kinds actually requested; a no-facility or water-only request never queries Supabase restrooms, and a request with no water requirement never loads the water dataset.
+2. **Natural match first.** The planner scores an ordinary candidate pool (the same generation above) against the requirements first. Constrained planners only run when requirements are present *and* fewer than the requested count of candidates from that pool are fully valid, avoiding constrained search whenever the ordinary pool already satisfies the request.
 3. **Geometry projection.** Each candidate facility is projected onto every segment of a route's *finished* geometry, not evaluated against the start point or a shortest-path proxy.
-4. **Encounter grouping.** Contiguous near-segment hits are grouped into distinct "encounters" — a facility passed twice on an out-and-back (once outbound, once on the return leg) is correctly represented as two independent encounters, not one.
-5. **Deterministic assignment.** A min-cost max-flow bipartite matching (`networkx.max_flow_min_cost`) assigns encounters to requirements: exact facility-kind only, and one encounter satisfies at most one requirement. Unmatched requirements get a "closest miss" explanation rather than silently disappearing.
-6. **Constrained planners.** If natural matching alone doesn't produce enough fully-valid candidates, a bounded beam search proposes candidates that route through the required facilities directly — a multi-anchor polygon loop for round requests, a corridor-based planner for out-and-back. Search is bounded by fixed budgets, not exhaustive over `facilities ^ requirements`; applicable planners run one at a time and a shared cooperative wall-clock budget (`ROUTE_PLANNING_BUDGET_S`, default 25s, started before natural generation) is checked before each expensive graph-routing operation across the whole call — not a hard preemptive cutoff, so actual worst-case search time is the budget plus at most one already-running graph operation. It returns the best honestly scored candidates found within that budget rather than exhausting every planner unconditionally.
-7. **Honest scoring.** A route is only "fully valid" if its distance is within tolerance *and* every requirement is satisfied this way. Partial results are always returned labeled `constraints_satisfied: false` — never silently upgraded to look complete.
+4. **Encounter grouping.** Contiguous near-segment hits are grouped into distinct "encounters," so a facility passed twice on an out-and-back (once outbound, once on the return leg) is represented as two independent encounters, not one.
+5. **Deterministic assignment.** A min-cost max-flow bipartite matching (`networkx.max_flow_min_cost`) assigns encounters to requirements: exact facility-kind only, and one encounter satisfies at most one requirement. Unmatched requirements get a "closest miss" explanation instead of disappearing.
+6. **Constrained planners.** If natural matching alone doesn't produce enough fully-valid candidates, a bounded beam search proposes candidates that route through the required facilities directly: a multi-anchor polygon loop for round requests, a corridor-based planner for out-and-back. Search is bounded by fixed budgets rather than exhaustive over `facilities ^ requirements`. Applicable planners run one at a time under a shared cooperative wall-clock budget (`ROUTE_PLANNING_BUDGET_S`, default 25s, started before natural generation) that's checked before each expensive graph-routing operation, so actual worst-case search time is the budget plus at most one already-running graph operation. It returns the best candidates found within that budget rather than exhausting every planner unconditionally.
+7. **Scoring.** A route is "fully valid" only if its distance is within tolerance *and* every requirement is satisfied this way. Partial results are labeled `constraints_satisfied: false` rather than upgraded to look complete.
 
 ## Ranking and diversity
 
@@ -126,13 +124,13 @@ After constraint-first ranking, final selection prefers alternatives whose undir
 
 | Decision | Why |
 |---|---|
-| Commit a versioned, checksummed graph artifact instead of building one per request | Pays the OSMnx build cost once, not per request; a corrupted artifact fails fast instead of serving silently-wrong routes |
-| Local graph engine instead of a third-party directions API | An external directions API can't be asked to honor an arbitrary list of cumulative-mile stops — the constraint has to be evaluated against the app's own route geometry |
-| Natural-match-first before constrained search | Constrained planning only runs when requirements are present and the ordinary candidate pool doesn't already satisfy them — avoids paying for beam search when the cheap path already works |
-| Finished-route geometry projection instead of a proximity/shortest-path proxy | A facility "near" the route in a straight line isn't the same as one the runner actually passes |
+| Commit a versioned, checksummed graph artifact instead of building one per request | Pays the OSMnx build cost once, not per request; a corrupted artifact fails fast instead of serving wrong routes |
+| Local graph engine instead of a third-party directions API | An external directions API can't be asked to honor an arbitrary list of cumulative-mile stops; the constraint has to be evaluated against the app's own route geometry |
+| Natural-match-first before constrained search | Constrained planning only runs when requirements are present and the ordinary candidate pool doesn't already satisfy them, avoiding beam search when the cheap path already works |
+| Finished-route geometry projection instead of a proximity/shortest-path proxy | A facility near the route in a straight line isn't the same as one the runner actually passes |
 | Bounded search instead of exhaustive combinatorial search | Keeps latency predictable at the cost of a known limitation on several simultaneous hard requirements (see below) |
-| Honest partial results instead of upgrading close misses | A route that satisfies 2 of 3 requirements is reported as such, not silently marked successful |
+| Report partial results instead of upgrading close misses | A route that satisfies 2 of 3 requirements is reported as such, not marked successful |
 
 ## Known technical boundary
 
-The constrained planners reliably recover a single genuinely-hard facility requirement, but do not currently solve requests with two or more simultaneous hard requirements — this is a bounded-search capability ceiling, not a hidden failure mode; unmet requirements are always reported honestly. See [`benchmarks.md`](benchmarks.md) for the measured extent of this limitation.
+The constrained planners reliably recover a single hard facility requirement, but don't currently solve requests with two or more simultaneous hard requirements. This is a bounded-search capability limit, not a bug; unmet requirements are always reported as such. See [`benchmarks.md`](benchmarks.md) for the measured extent of this limitation.

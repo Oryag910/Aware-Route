@@ -40,7 +40,7 @@ const ROUTE_COLORS = {
   trailSelected: "#3f6b4f",
 } as const;
 
-// Self-contained SVG divIcons — no external image asset / bundler icon fix.
+// Self-contained SVG divIcons, avoiding an external image asset or bundler icon fix.
 const startIcon = L.divIcon({
   className: "aware-marker aware-marker--start",
   html: `

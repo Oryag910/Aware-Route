@@ -1,15 +1,15 @@
 """Tests for the shared round-generator seam (`engine._round_pairs`):
-ROUND_GENERATOR selects V1 vs polygon consistently for BOTH explicit
+ROUND_GENERATOR selects V1 vs polygon consistently for both explicit
 `shape="round"` and `shape="mix"`'s round component, closing the PR
-#16/#17 gap where mix silently hardcoded V1 regardless of the flag.
-`"auto"` is the default (see `engine._round_generator_version`) as of
-PR #29 -- polygon for `requested_count<=3`, v1 for `requested_count>=4`;
+#16/#17 gap where mix used to hardcode V1 regardless of the flag.
+`"auto"` is the default (see `engine._round_generator_version`):
+polygon for `requested_count<=3`, v1 for `requested_count>=4`.
 `ROUND_GENERATOR=v1`/`=polygon` force a single generator regardless of
 requested_count.
 
 Uses a dense grid graph (not the sparse star/spoke fixtures elsewhere in
 this test suite) because polygon's multi-anchor loop needs real
-alternate streets to route four legs without collapsing -- mirrors
+alternate streets to route four legs without collapsing. Mirrors
 `tests/generation/test_polygon_loop.py`'s `grid_graph` fixture.
 """
 
@@ -100,10 +100,10 @@ def _spy(counter: dict[str, int], key: str, real: object) -> object:
 def test_explicit_round_no_env_defaults_to_auto_selects_polygon_at_count_3(
     monkeypatch: pytest.MonkeyPatch, grid_graph: nx.MultiDiGraph, start: Coordinate
 ) -> None:
-    """No `ROUND_GENERATOR` set at all -- the real production default as
-    of PR #29 -- must resolve to `"auto"`, which picks polygon at the
-    product's own count=3 default (`generate_candidates`'s `count` here
-    doubles as `requested_count` since it's omitted)."""
+    """No `ROUND_GENERATOR` set at all must resolve to `"auto"`, which
+    picks polygon at the product's own count=3 default
+    (`generate_candidates`'s `count` here doubles as `requested_count`
+    since it's omitted)."""
     monkeypatch.delenv("ROUND_GENERATOR", raising=False)
     calls = {"polygon": 0, "v1": 0}
     monkeypatch.setattr(
@@ -120,8 +120,8 @@ def test_explicit_round_no_env_defaults_to_auto_selects_polygon_at_count_3(
 def test_explicit_round_no_env_defaults_to_auto_selects_v1_at_count_5(
     monkeypatch: pytest.MonkeyPatch, grid_graph: nx.MultiDiGraph, start: Coordinate
 ) -> None:
-    """Same no-env default, but at the API's max count=5 -- auto must
-    still fall back to v1 there, exactly like an explicit
+    """Same no-env default, but at the API's max count=5, where auto
+    must still fall back to v1, exactly like an explicit
     `ROUND_GENERATOR=auto` would."""
     monkeypatch.delenv("ROUND_GENERATOR", raising=False)
     calls = {"polygon": 0, "v1": 0}
@@ -155,8 +155,8 @@ def test_mix_round_component_no_env_defaults_to_auto_selects_polygon_at_count_3(
     monkeypatch: pytest.MonkeyPatch, grid_graph: nx.MultiDiGraph, start: Coordinate
 ) -> None:
     """Mirrors the explicit-round default: mix's round half must track
-    the SAME default as explicit round, not silently diverge (the PR
-    #16/#17 gap this migration closes)."""
+    the same default as explicit round (the PR #16/#17 gap this
+    migration closes)."""
     monkeypatch.delenv("ROUND_GENERATOR", raising=False)
     calls = {"polygon": 0, "v1": 0}
     monkeypatch.setattr(
@@ -174,9 +174,8 @@ def test_round_generator_polygon_env_makes_mix_round_component_use_polygon(
     monkeypatch: pytest.MonkeyPatch, grid_graph: nx.MultiDiGraph, start: Coordinate
 ) -> None:
     """The gap this migration closes: PR #16/#17 had mix hardcode V1
-    for its round component regardless of ROUND_GENERATOR. This must no
-    longer be true -- mix's round half goes through the same seam as
-    explicit round."""
+    for its round component regardless of ROUND_GENERATOR. Mix's round
+    half now goes through the same seam as explicit round."""
     monkeypatch.setenv("ROUND_GENERATOR", "polygon")
     calls = {"polygon": 0, "v1": 0}
     monkeypatch.setattr(
@@ -192,7 +191,7 @@ def test_round_generator_polygon_env_makes_mix_round_component_use_polygon(
 def test_mix_still_uses_ordinary_out_and_back_generator(
     monkeypatch: pytest.MonkeyPatch, grid_graph: nx.MultiDiGraph, start: Coordinate
 ) -> None:
-    """Only the round half of mix is affected by ROUND_GENERATOR -- the
+    """Only the round half of mix is affected by ROUND_GENERATOR; the
     out_and_back half must keep calling the same generator regardless of
     the flag's value."""
     monkeypatch.setenv("ROUND_GENERATOR", "polygon")
@@ -242,8 +241,8 @@ def test_requested_final_count_is_respected(
     round_generator: str,
     shape: Shape,
 ) -> None:
-    """The real product contract is an EXACT count, not merely "at most"
-    -- `test_no_facilities_returns_full_requested_count` in
+    """The real product contract is an exact count, not merely "at most":
+    `test_no_facilities_returns_full_requested_count` in
     tests/test_generic_routes.py asserts this end-to-end on the real
     Manhattan graph. This dense, well-connected synthetic grid has
     plenty of turnaround/template alternatives for every generator/shape
@@ -260,7 +259,7 @@ def test_requested_final_count_is_respected(
 # ---------------------------------------------------------------------------
 # Reliability fallback: polygon's own within-tolerance yield can be too
 # thin in constrained local topology (see `engine._round_pairs`'s
-# docstring and docs/benchmarks.md) -- these pin down the fallback
+# docstring and docs/benchmarks.md). These tests pin down the fallback
 # mechanism directly rather than relying on real-graph geography to
 # reproduce the shortfall.
 # ---------------------------------------------------------------------------
@@ -289,8 +288,8 @@ def test_polygon_healthy_tolerance_yield_skips_v1_fallback(
     monkeypatch: pytest.MonkeyPatch, grid_graph: nx.MultiDiGraph, start: Coordinate
 ) -> None:
     """When polygon alone already clears the floor, V1 must not run at
-    all -- the fallback is a targeted top-up, not an unconditional
-    blend of both generators on every request."""
+    all: the fallback is a targeted top-up, not an unconditional blend
+    of both generators on every request."""
     monkeypatch.setenv("ROUND_GENERATOR", "polygon")
     calls = {"v1": 0}
     monkeypatch.setattr(engine_module, "round_pairs", _spy(calls, "v1", real_round_pairs))
@@ -301,9 +300,9 @@ def test_polygon_healthy_tolerance_yield_skips_v1_fallback(
 
 
 # ---------------------------------------------------------------------------
-# ROUND_GENERATOR="auto": selects the generator off the user's REAL
+# ROUND_GENERATOR="auto": selects the generator off the user's real
 # requested final count, never the (often much larger) internal
-# candidate-pool size -- see `engine._round_generator_version`'s
+# candidate-pool size. See `engine._round_generator_version`'s
 # docstring. `"auto"` is the no-env default (see the dedicated no-env
 # tests above); the tests below set the env var explicitly to exercise
 # "auto"'s selection logic directly, independent of default-value
@@ -334,12 +333,12 @@ def test_auto_selects_v1_for_requested_count_above_threshold(
 def test_auto_selects_polygon_for_requested_count_3_regardless_of_pool_size(
     pool_size: int, monkeypatch: pytest.MonkeyPatch, grid_graph: nx.MultiDiGraph, start: Coordinate
 ) -> None:
-    """The important cases here are pool_size=9 and pool_size=12 -- the
+    """The important cases here are pool_size=9 and pool_size=12: the
     exact overcomplete pool sizes `facilities.orchestration.natural_match_pool`
     requests for a real `count=3` ask (see (D) below). `_round_pairs`
     receives `pool_size` as its `count` argument (candidate construction
-    size, unchanged role) but `requested_count=3` separately -- selection
-    must track the latter, not the former."""
+    size, unchanged role) but `requested_count=3` separately, and
+    selection must track the latter, not the former."""
     monkeypatch.setenv("ROUND_GENERATOR", "auto")
     calls = {"polygon": 0, "v1": 0}
     monkeypatch.setattr(
@@ -445,7 +444,7 @@ def test_auto_mix_out_and_back_component_unaffected(
     monkeypatch: pytest.MonkeyPatch, grid_graph: nx.MultiDiGraph, start: Coordinate
 ) -> None:
     """`ROUND_GENERATOR=auto` (and requested_count) must only steer the
-    round half of mix -- out_and_back generation is untouched regardless."""
+    round half of mix; out_and_back generation is untouched regardless."""
     monkeypatch.setenv("ROUND_GENERATOR", "auto")
     calls = {"oab": 0}
     monkeypatch.setattr(
@@ -530,7 +529,7 @@ def test_natural_match_pool_with_facility_separates_pool_size_from_requested_cou
 
 
 # (E) Direct/internal callers that omit `requested_count` keep existing
-# behavior -- it defaults to `count`, so pre-existing call sites
+# behavior: it defaults to `count`, so pre-existing call sites
 # (generate_candidates, benchmark scripts, other tests) are unaffected.
 
 
@@ -544,7 +543,7 @@ def test_requested_count_defaults_to_count_when_omitted(
     )
     monkeypatch.setattr(engine_module, "round_pairs", _spy(calls, "v1", real_round_pairs))
 
-    # No requested_count passed -- generate_candidates never threads one
+    # No requested_count passed: generate_candidates never threads one
     # through, so it must fall back to count=5, which auto maps to v1.
     generate_candidates(grid_graph, start, TARGET_DISTANCE_M, "round", 5)
 
@@ -568,7 +567,7 @@ def test_requested_count_defaults_to_count_3_selects_polygon(
 
 
 # (F) `RouteRequest.count` contract (default 3, max 5) is unmodified by
-# this migration -- this is a smoke check, the canonical contract test
+# this migration. This is a smoke check; the canonical contract test
 # lives alongside the model in `tests/test_generic_routes.py` /
 # `app/main.py`.
 

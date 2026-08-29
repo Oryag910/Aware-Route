@@ -14,20 +14,20 @@ data:
 
 ## How each file is derived
 
-- **`manhattan_walk_graph.v1.pkl`** — the Manhattan pedestrian network fetched
+- **`manhattan_walk_graph.v1.pkl`**: the Manhattan pedestrian network fetched
   via [OSMnx](https://osmnx.readthedocs.io/) (`ox.graph_from_place`), which
   queries the OSM Overpass API and returns the walkable way network for the
   requested area. See `backend/scripts/build_graph.py` and
   [`docs/graph-packaging.md`](docs/graph-packaging.md).
-- **`fountains.json`** — OSM nodes/ways tagged `amenity=drinking_water`
+- **`fountains.json`**: OSM nodes/ways tagged `amenity=drinking_water`
   within a Manhattan bounding box, fetched directly from the Overpass API.
   See `backend/scripts/ingest_fountains.py`.
-- **`interruptions.json`** — OSM nodes tagged `highway=traffic_signals` or
+- **`interruptions.json`**: OSM nodes tagged `highway=traffic_signals` or
   `highway=crossing` within the same bounding box, fetched the same way.
   See `backend/scripts/ingest_interruptions.py`.
 
 All three are extractions of OSM data with light, mechanical processing
-(network filtering, coordinate rounding, bounding-box clipping) — not
+(network filtering, coordinate rounding, bounding-box clipping), not
 independently authored datasets. Treat them as OSM-derived database material.
 
 ## License terms
@@ -45,7 +45,7 @@ anyone using these files must:
   ODbL's terms (including its share-alike provisions for redistributed
   derivative databases).
 
-This document is a pointer, not a substitute for the license — read the
+This document is a pointer, not a substitute for the license. Read the
 ODbL text at the link above for the actual terms.
 
 ## Elevation data (graph artifact only)

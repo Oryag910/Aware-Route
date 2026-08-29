@@ -1,7 +1,7 @@
 // Brand wordmark mark: a looping trail line that terminates in a location
-// pin — "a route that finds a stop." Flat, two brand colors, favicon-safe.
-// Hex literals (not CSS vars) so it renders reliably as SVG presentation
-// attributes across browsers.
+// pin, representing "a route that finds a stop." Flat, two brand colors,
+// favicon-safe. Hex literals (not CSS vars) so it renders reliably as SVG
+// presentation attributes across browsers.
 
 type AwareMarkProps = {
   className?: string;

@@ -13,17 +13,17 @@ from app.routing.provider import (
 
 
 # A candidate within this many meters of the target is already accurate
-# enough — matches the hard constraint used downstream in scoring.py.
+# enough, matching the hard constraint used downstream in scoring.py.
 MAX_DISTANCE_ERROR_M = 100.0
 
 # Candidates within this fraction of the target get repaired in the
-# first pass — close enough that a nudged waypoint plausibly fixes them.
+# first pass: close enough that a nudged waypoint plausibly fixes them.
 NEAR_MISS_RATIO = 0.15
 
 # When the first pass leaves no candidate within tolerance and budget
-# remains, a second "rescue" pass widens eligibility up to this fraction
-# — covers areas like Battery Park where every candidate misses badly
-# and nothing would otherwise be repaired at all.
+# remains, a second "rescue" pass widens eligibility up to this fraction.
+# Covers areas like Battery Park where every candidate misses badly and
+# nothing would otherwise be repaired at all.
 RESCUE_RATIO = 0.5
 
 # Bound on corrective rounds per anchor for a single candidate.
@@ -62,9 +62,9 @@ MAX_ROUNDS_WITHOUT_IMPROVEMENT = 2
 @dataclass(frozen=True)
 class RepairTarget:
     """A candidate plus the restroom waypoint (if any) its route must
-    keep passing through while repair reshapes it — without this,
-    fixing a restroom-first candidate's distance would silently drop
-    the restroom the route was built around."""
+    keep passing through while repair reshapes it. Without this, fixing
+    a restroom-first candidate's distance would drop the restroom the
+    route was built around."""
 
     candidate: RouteCandidate
     via: Coordinate | None = None
@@ -101,7 +101,7 @@ def _via_before_anchor(
     """Whether the restroom should ride the outbound leg (before the
     anchor) or the return leg. An out-and-back places an outbound via
     at roughly its direct distance from start, and a return-leg via at
-    roughly the target minus that — pick whichever estimate lands
+    roughly the target minus that. Picks whichever estimate lands
     closer to the requested restroom band, so fixing distance also
     places the restroom correctly instead of wherever it happens to
     fall."""
@@ -201,9 +201,9 @@ def _repair_candidate(
             try:
                 attempt = provider.get_route_through_waypoints(waypoints)
             except RouteNotFoundError:
-                # This anchor is unroutable (still costs an ORS call)
-                # — move to the next anchor rather than giving up on
-                # the candidate.
+                # This anchor is unroutable (still costs an ORS call).
+                # Move to the next anchor rather than giving up on the
+                # candidate.
                 calls_used += 1
                 break
             except RoutingProviderError:

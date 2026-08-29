@@ -23,67 +23,40 @@ AUTO_POLYGON_MAX_REQUESTED_COUNT = 3
 
 
 def _round_generator_version(requested_count: int) -> RoundGenerator:
-    """Feature selector for ordinary round-pool generation. Sourced from
-    the `ROUND_GENERATOR` environment variable so it can be flipped
-    without a code change:
+    """Selects which round-pool generator to use, via `ROUND_GENERATOR`:
 
     - `"polygon"`: always polygon, regardless of `requested_count`.
     - `"v1"`: always v1, regardless of `requested_count`.
-    - `"auto"` (the default -- `os.environ.get("ROUND_GENERATOR", "auto")`
-      below -- so an UNSET `ROUND_GENERATOR` means auto, not v1): polygon
-      when `requested_count <= AUTO_POLYGON_MAX_REQUESTED_COUNT`, v1
-      otherwise -- see that constant for why 3 is the line.
-    - anything else (an explicitly invalid value, e.g. a typo): falls
-      back to `"v1"`, the long-proven-safe generator, so a misconfigured
-      environment can never accidentally enable an unvalidated path.
+    - `"auto"` (the default, including when unset): polygon when
+      `requested_count <= AUTO_POLYGON_MAX_REQUESTED_COUNT`, v1
+      otherwise.
+    - any other value (e.g. a typo): falls back to `"v1"`.
 
-    Applies everywhere an ORDINARY round candidate pool is built for the
-    generic `/routes` path -- explicit `shape="round"` AND the round
+    Applies everywhere an ordinary round candidate pool is built for the
+    generic `/routes` path: explicit `shape="round"` and the round
     component of `shape="mix"` (both go through `_round_pairs` below),
     plus `facilities.orchestration`'s overcomplete natural-match pools,
-    since those call the same `generate_routes` seam. "out_and_back" is
-    untouched. The deprecated `/routes/with-restroom` endpoint's
-    amenity-aware branch further down this file also reads this flag for
-    its own "round" case, unchanged from PR #16 -- but its "mix" case
-    still hardcodes V1's `through_amenities_pairs` regardless, since
-    that legacy contract is out of scope for this migration.
+    which call the same `generate_routes` seam. `shape="out_and_back"`
+    is untouched. The deprecated `/routes/with-restroom` endpoint's
+    amenity-aware branch reads this flag for its own "round" case; its
+    "mix" case still hardcodes v1's `through_amenities_pairs`.
 
-    `requested_count` MUST be the user's actual requested final route
-    count (`RouteRequest.count`, 1-5, default 3) -- NEVER an internal
+    `requested_count` must be the user's actual requested final route
+    count (`RouteRequest.count`, 1-5, default 3), never an internal
     overcomplete candidate-pool size. `facilities.orchestration`'s
-    natural-match pools intentionally over-request candidates for their
-    own downstream diversity/portfolio selection (e.g. requesting 9 or
-    12 candidates for a real `count=3` ask -- see
-    `NO_FACILITY_POOL_MULTIPLIER`/`NATURAL_POOL_MULTIPLIER`); selecting
-    the generator off that inflated number would silently pick v1 for
-    the product's actual count=3 default the moment facility
-    requirements are present, exactly the bug this parameter prevents.
+    natural-match pools over-request candidates for downstream
+    diversity selection (e.g. 9 or 12 candidates for a real `count=3`
+    ask, see `NO_FACILITY_POOL_MULTIPLIER`/`NATURAL_POOL_MULTIPLIER`),
+    and selecting the generator off that inflated number would pick v1
+    for the count=3 default whenever facility requirements are present.
     See `generate_routes`'s `requested_count` parameter and
-    `_round_pairs` for how the real count is threaded down here
+    `_round_pairs` for how the real count is threaded down here,
     independent of the pool-size `count` those functions also carry.
 
-    History: default was "v1" from PR #16/#17 through three rounds of
-    Polygon re-evaluation (PRs #26/#27, and a closed, unmerged PR #28
-    architectural experiment) that each landed real fixes -- a
-    `reuse_penalty` optimization, a within-tolerance-first ranking +
-    bounded V1 top-up (`_round_pairs`), a scale-correction plateau fix,
-    a diversity-selection fix -- without ever closing Polygon's
-    full-suite p95 latency or count=5 reliability gate outright. What
-    those rounds DID establish, measured directly rather than assumed:
-    Polygon is unambiguously the better choice at the product's actual
-    count=3 default (100% exact-count, 100% all-within-tolerance, p95
-    ~1.5s, and geometry dramatically better than v1 throughout), while
-    v1 remains the better choice at count=5 (~99.4% vs polygon's
-    ~93.3-93.9% all-within-tolerance across those three rounds, and
-    faster on the worst large-pool scenarios). Rather than continue
-    trying to force one generator to win at every supported count,
-    `"auto"` (PR #29, now the default) selects the generator actually
-    validated for the request's own count -- see docs/benchmarks.md for
-    the same-commit evidence this policy is based on, including a fresh
-    same-commit re-run of the auto policy itself (not just polygon or
-    v1 in isolation) confirming count=3 matches polygon's own numbers
-    and count=5 matches v1's own numbers, with no full-suite or
-    facility-benchmark regression.
+    Polygon has better geometry and matches or beats v1 at count=3;
+    v1 has better full-suite latency and better reliability at count=5.
+    See docs/benchmarks.md for the measurements behind the `auto`
+    policy and its predecessors.
     """
     value = os.environ.get("ROUND_GENERATOR", "auto").strip().lower()
     if value == "polygon":
@@ -92,22 +65,18 @@ def _round_generator_version(requested_count: int) -> RoundGenerator:
         return "v1"
     if value == "auto":
         return "polygon" if requested_count <= AUTO_POLYGON_MAX_REQUESTED_COUNT else "v1"
-    return "v1"  # explicitly invalid value -- never silently enable an unvalidated path
+    return "v1"  # explicitly invalid value, so it never enables an unvalidated path
 
 
 # Below this many of polygon's own within-tolerance candidates, top up
-# the pool with V1 (see `_round_pairs`). Deliberately the API's max
-# product `count` (5), not the (often much larger) overcomplete pool
-# size `_round_pairs` actually receives -- the goal is "enough genuinely
-# in-tolerance candidates to satisfy any real request downstream," not
-# "every candidate in the pool must be in tolerance." Narrow/constrained
-# local topology (e.g. upper-Manhattan peninsulas) at larger target
-# distances can leave several of polygon's 10 templates unable to close
-# to within `DEFAULT_TOLERANCE_M` at any scale in its bounds -- measured
-# via `scripts/benchmark_count_reliability.py`: round-shape "all 3
-# returned within tolerance" dropped from V1's 99.4% to polygon-alone's
-# 84.4% on the same commit, concentrated in exactly this geography/
-# distance combination (see docs/benchmarks.md).
+# the pool with V1 (see `_round_pairs`). Set to the API's max product
+# `count` (5) rather than the often much larger overcomplete pool size
+# `_round_pairs` actually receives: the goal is enough in-tolerance
+# candidates to satisfy any real request, not every candidate in the
+# pool being in tolerance. In narrow local topology (e.g. upper-
+# Manhattan peninsulas) at larger target distances, several of
+# polygon's 10 templates can fail to close within `DEFAULT_TOLERANCE_M`
+# at any scale; see docs/benchmarks.md for the measured impact.
 MIN_WITHIN_TOLERANCE_FLOOR = 5
 
 
@@ -118,11 +87,10 @@ def _tolerance_first(
     each tier. `polygon_loop_pairs` on its own ranks purely by
     isoperimetric quotient, which can rank an off-target-but-rounder
     candidate ahead of an in-tolerance one even when the pool has
-    plenty of in-tolerance candidates to spare -- this is the second
-    half of the fix `_round_pairs` needs (see `MIN_WITHIN_TOLERANCE_FLOOR`
-    for the first): a caller that only keeps the top few (e.g. a bare
-    `generate_candidates` call with no downstream re-ranking) must not
-    have distance accuracy silently lose to roundness."""
+    plenty of in-tolerance candidates to spare. A caller that only
+    keeps the top few (e.g. a bare `generate_candidates` call with no
+    downstream re-ranking) needs distance accuracy to win over
+    roundness."""
 
     def sort_key(pair: tuple[RouteCandidate, list[int]]) -> tuple[int, float]:
         candidate, _node_path = pair
@@ -155,34 +123,30 @@ def _round_pairs(
     paths: dict[int, list[int]] | None,
     requested_count: int,
 ) -> list[tuple[RouteCandidate, list[int]]]:
-    """Shared round-pool seam: the ONE place that decides V1 vs polygon
+    """Shared round-pool seam: the one place that decides v1 vs polygon
     for an ordinary round candidate pool, per `_round_generator_version`.
     Used by both explicit `shape="round"` and `shape="mix"`'s round
-    component below, so neither can silently diverge from the other --
-    see `_round_generator_version`'s docstring for the PR #16/#17
-    history this replaces (mix used to hardcode V1 regardless of the
-    flag).
+    component below, so the two can't diverge.
 
-    `count` and `requested_count` are deliberately DIFFERENT numbers:
-    `count` is how many round candidates to actually BUILD (the
-    candidate-pool size -- may be a caller's overcomplete pool, e.g. 9
-    or 12 for a real 3-route ask, see `generate_routes`), unchanged in
-    role from before and still what's passed to `polygon_loop_pairs` and
-    `MIN_WITHIN_TOLERANCE_FLOOR`'s fallback math below. `requested_count`
-    is the user's actual final route count and is used ONLY to pick the
-    generator (`_round_generator_version`) -- it must never affect how
-    many candidates get built.
+    `count` and `requested_count` are different numbers. `count` is how
+    many round candidates to actually build (the candidate-pool size,
+    which may be a caller's overcomplete pool, e.g. 9 or 12 for a real
+    3-route ask; see `generate_routes`), and it's what's passed to
+    `polygon_loop_pairs` and `MIN_WITHIN_TOLERANCE_FLOOR`'s fallback
+    math below. `requested_count` is the user's actual final route
+    count and is used only to pick the generator
+    (`_round_generator_version`); it never affects how many candidates
+    get built.
 
     When polygon is selected, its own pool is topped up with V1
     candidates whenever polygon alone can't supply
     `MIN_WITHIN_TOLERANCE_FLOOR` in-tolerance candidates, and the
     combined pool is ranked in-tolerance-first (see
-    `MIN_WITHIN_TOLERANCE_FLOOR` and `_tolerance_first`) -- polygon's
-    better geometry still wins whenever it actually has enough
-    in-tolerance candidates to offer (the common case), and V1's
-    spur-guaranteed convergence is the fallback exactly where polygon's
-    never-splice-a-spur design can leave a scenario short, never a
-    silent, unconditional blend of the two."""
+    `MIN_WITHIN_TOLERANCE_FLOOR` and `_tolerance_first`). Polygon's
+    better geometry wins whenever it has enough in-tolerance candidates
+    to offer, which is the common case; v1's spur-guaranteed
+    convergence only kicks in where polygon's never-splice-a-spur
+    design leaves a scenario short."""
     if _round_generator_version(requested_count) != "polygon":
         return _tuned_pairs(graph, start_node, dists, "round", target_distance_m, count, paths)
 
@@ -197,11 +161,11 @@ def _round_pairs(
         return _tolerance_first(polygon_pairs, target_distance_m)[:count]
 
     # Only ask V1 for enough candidates to close the shortfall, not a
-    # full `count`-sized pool -- V1's own turnaround search already
+    # full `count`-sized pool. V1's own turnaround search already
     # scales with what it's asked for (`round_pairs` requests
     # `min(v1_count * 2, MAX_TURNAROUND_ATTEMPTS)` turnarounds), so
-    # asking for fewer meaningfully cuts the extra Dijkstra work this
-    # fallback pays on top of polygon's own (already-paid) cost.
+    # asking for fewer cuts the extra Dijkstra work this fallback pays
+    # on top of polygon's own already-paid cost.
     v1_count = max(1, tolerance_floor - within_tolerance)
     v1_pairs = _tuned_pairs(graph, start_node, dists, "round", target_distance_m, v1_count, paths)
     combined = _dedup_pairs(polygon_pairs + v1_pairs)
@@ -278,33 +242,32 @@ def generate_routes(
     first by isoperimetric quotient; "out_and_back" is ranked by the
     turnaround-bearing diversity already applied in `out_and_back_pairs`.
 
-    `count` is both "how many to construct per shape" and (when
-    `result_count` is omitted) "how many to keep". Callers that want an
-    overcomplete candidate pool for their OWN downstream selection (e.g.
+    `count` is both "how many to construct per shape" and, when
+    `result_count` is omitted, "how many to keep". Callers that want an
+    overcomplete candidate pool for their own downstream selection (e.g.
     `app.facilities.orchestration`'s shape-balanced mix portfolio) pass a
-    larger `result_count`: for "mix" this skips the roundest-first
-    truncation (which would otherwise silently drop every out_and_back
-    candidate -- round loops structurally score much higher on
-    isoperimetric quotient than a there-and-back line, so ranking the
-    combined pool by quotient before a caller can apply its own shape
-    quota starves that quota of out_and_back candidates regardless of
-    how large the pool is) and instead keeps the wider deduped union.
+    larger `result_count`. For "mix" this skips the roundest-first
+    truncation and keeps the wider deduped union instead: round loops
+    score much higher on isoperimetric quotient than a there-and-back
+    line, so ranking the combined pool by quotient before a caller
+    applies its own shape quota would starve that quota of out_and_back
+    candidates regardless of pool size.
 
-    `requested_count`, independently, is the USER'S actual requested
-    final route count -- used ONLY by the round-generator seam
-    (`_round_pairs` -> `_round_generator_version`) to pick v1 vs polygon
-    in `ROUND_GENERATOR=auto` mode, never to change how many candidates
-    get built (that's still `count`/`result_count`). Defaults to `count`
-    when omitted, preserving every direct caller's existing behavior
-    (`generate_candidates`, `generate_amenity_aware`, benchmark scripts,
-    tests -- none of which distinguish an overcomplete pool from a real
-    ask, so `count` already IS their real requested count). A caller
-    that DOES build an overcomplete pool for its own downstream
-    selection -- currently only `facilities.orchestration.natural_match_pool`
-    -- must pass its real, pre-inflation count here explicitly, or auto
-    mode would see the inflated pool size (e.g. 9 or 12 for a real
-    count=3 ask) and silently pick v1 for what is actually the product's
-    validated count=3 case.
+    `requested_count` is the user's actual requested final route count,
+    used only by the round-generator seam (`_round_pairs` ->
+    `_round_generator_version`) to pick v1 vs polygon in
+    `ROUND_GENERATOR=auto` mode. It never changes how many candidates
+    get built; that's still `count`/`result_count`. Defaults to `count`
+    when omitted, which preserves every direct caller's existing
+    behavior (`generate_candidates`, `generate_amenity_aware`,
+    benchmark scripts, tests): none of them distinguish an overcomplete
+    pool from a real ask, so `count` already is their real requested
+    count. A caller that does build an overcomplete pool for its own
+    downstream selection, currently only
+    `facilities.orchestration.natural_match_pool`, must pass its real,
+    pre-inflation count here explicitly, or auto mode would see the
+    inflated pool size (e.g. 9 or 12 for a real count=3 ask) and pick
+    v1 for what is actually the product's validated count=3 case.
     """
     effective_requested_count = count if requested_count is None else requested_count
 
@@ -369,14 +332,14 @@ def generate_routes(
             )
         else:
             # A caller doing its own shape-balanced portfolio selection
-            # (e.g. orchestration's mix quota) needs BOTH shapes
+            # (e.g. orchestration's mix quota) needs both shapes
             # represented in the truncated pool it gets back. Simply
             # concatenating round_pool + out_back_pool and truncating
-            # would silently drop every out_and_back candidate whenever
-            # round_pool alone already fills `final_count` (round routes
-            # are also far more likely to survive tuning on a dense
-            # Manhattan grid) -- interleaving round-robin guarantees both
-            # shapes get a fair share of the truncated slots.
+            # would drop every out_and_back candidate whenever round_pool
+            # alone already fills `final_count` (round routes are also
+            # far more likely to survive tuning on a dense Manhattan
+            # grid), so round-robin interleaving gives both shapes a
+            # fair share of the truncated slots.
             interleaved = [
                 route
                 for pair in zip(round_pool, out_back_pool, strict=False)
@@ -477,7 +440,7 @@ def generate_amenity_aware(
 
     Unions the amenity-passing pool from `generate_through_amenities`
     with the ordinary shape-based pool, dedups, and returns the best
-    `count` -- amenity-passing candidates are listed first since they
+    `count`. Amenity-passing candidates are listed first since they
     satisfy a strictly harder constraint, then the rest fill out the
     count ranked by distance accuracy (round/mix also weigh roundness).
     Thin wrapper around `generate_routes` that drops the node_path/
@@ -509,10 +472,9 @@ def generate_polygon_loop_candidates(
     comparison. `generate_routes`'s shared `_round_pairs` seam also
     calls `polygon_loop_pairs` directly (this function's own
     implementation, inlined) for both explicit `shape="round"` and
-    `shape="mix"`'s round component whenever `ROUND_GENERATOR=polygon`
-    is set (opt-in -- see `_round_generator_version` for why this isn't
-    the default yet). "out_and_back" is unaffected by the flag
-    regardless.
+    `shape="mix"`'s round component whenever `ROUND_GENERATOR` selects
+    polygon (see `_round_generator_version`). "out_and_back" is
+    unaffected by the flag regardless.
     """
     start_node = nearest_node(graph, start)
     _dists, paths = single_source_paths(graph, start_node)
@@ -530,21 +492,20 @@ def generate_polygon_loop_amenity_candidates(
     max_range_m: float,
 ) -> list[RouteCandidate]:
     """Amenity-aware polygon-loop round-route generator (PR #16):
-    routes an amenity as a WAYPOINT on one leg of a multi-anchor
+    routes an amenity as a waypoint on one leg of a multi-anchor
     polygon loop (see `polygon_amenity.py`) instead of treating it as
-    the route's turnaround the way V1's `generate_amenity_aware` does.
+    the route's turnaround the way v1's `generate_amenity_aware` does.
 
     Standalone entry point used directly by
-    scripts/benchmark_polygon_amenity.py for side-by-side V1-vs-V2
+    scripts/benchmark_polygon_amenity.py for side-by-side v1-vs-v2
     comparison. `generate_routes`'s `shape == "round"` amenity-aware
     branch (the deprecated `/routes/with-restroom` contract only) also
     calls `polygon_loop_through_amenities_pairs` (this function's own
-    implementation, inlined) whenever `ROUND_GENERATOR=polygon` is set
-    (opt-in -- see `_round_generator_version`). Unlike
-    the non-amenity-aware seam (`_round_pairs`), this legacy branch's
-    "mix" case is NOT migrated -- it still hardcodes V1
-    `through_amenities_pairs` regardless of the flag, since
-    `/routes/with-restroom` is out of scope for this migration.
+    implementation, inlined) whenever `ROUND_GENERATOR` selects polygon
+    (see `_round_generator_version`). Unlike the non-amenity-aware seam
+    (`_round_pairs`), this legacy branch's "mix" case still hardcodes
+    v1's `through_amenities_pairs` regardless of the flag; that path
+    (`/routes/with-restroom`) is out of scope for this migration.
     "out_and_back" is unaffected by the flag regardless.
     """
     triples = polygon_loop_through_amenities_pairs(

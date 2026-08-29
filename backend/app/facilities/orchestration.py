@@ -1,19 +1,18 @@
 """Natural-match-first route planning for the generic `/routes` endpoint.
 
-Phase 2 of the PR #18 rebuild: generate an ordinary, shape-appropriate
-candidate pool exactly the way the no-facility path already does, then
-score every candidate against the generic facility matcher. No facility
-snapping happens here -- `find_facility_encounters` (via
-`score_facility_requirements`) works directly off finished route
-geometry, so natural matching costs nothing extra when
-`facility_requirements=[]` beyond the trivial early-return in
-`score_facility_requirements`.
+Generates an ordinary, shape-appropriate candidate pool the same way
+the no-facility path already does, then scores every candidate against
+the generic facility matcher. No facility snapping happens here:
+`find_facility_encounters` (via `score_facility_requirements`) works
+directly off finished route geometry, so natural matching costs
+nothing extra when `facility_requirements=[]` beyond the trivial
+early-return in `score_facility_requirements`.
 
-`plan_routes` is deliberately the ONLY seam constrained planners
-(multi-facility Polygon round / out-and-back, added in later phases)
-need to extend: they contribute additional `GeneratedRoute` candidates
-into the same pool before scoring, so one scorer/ranker stays
-authoritative for both natural and constrained candidates.
+`plan_routes` is the only seam constrained planners (multi-facility
+polygon round / out-and-back) need to extend: they contribute
+additional `GeneratedRoute` candidates into the same pool before
+scoring, so one scorer/ranker stays authoritative for both natural and
+constrained candidates.
 """
 
 import logging
@@ -40,12 +39,11 @@ from app.routing.provider import Coordinate
 # The app configures no explicit logging (no `logging.basicConfig`, no
 # uvicorn `--log-config`), so a plain `logging.getLogger(__name__)`
 # logger has no handler and an effective level of WARNING inherited
-# from the unconfigured root logger -- `.info()` calls on it are
-# silently dropped, never reaching stdout/Render's log capture.
-# Uvicorn DOES configure "uvicorn.error" (and "uvicorn.access") with a
-# stdout handler at INFO level on startup, so route_plan timing reuses
-# that already-configured logger rather than adding any new logging
-# setup of our own.
+# from the unconfigured root logger: `.info()` calls on it are dropped
+# and never reach stdout/Render's log capture. Uvicorn does configure
+# "uvicorn.error" (and "uvicorn.access") with a stdout handler at INFO
+# level on startup, so route_plan timing reuses that already-configured
+# logger rather than adding any new logging setup of our own.
 logger = logging.getLogger("uvicorn.error")
 
 Shape = Literal["round", "out_and_back", "mix"]
@@ -56,17 +54,17 @@ NATURAL_POOL_MULTIPLIER = 4
 NATURAL_POOL_CEILING = 16
 
 # No-facility mode skips Supabase, snapping, encounters, assignment, and
-# every constrained planner -- the only extra cost of overcompleting its
-# pool is ordinary graph-route construction, which is cheap enough to
-# afford a modest cushion. Without this, `select_diverse` and the
+# every constrained planner, so the only extra cost of overcompleting
+# its pool is ordinary graph-route construction, which is cheap enough
+# to afford a modest cushion. Without this, `select_diverse` and the
 # generic scorer had exactly `count` raw candidates to work with and no
-# room to recover when one turned out overlapping/invalid -- the same
+# room to recover when one turned out overlapping/invalid: the same
 # problem `NATURAL_POOL_MULTIPLIER` already solves for the
 # with-requirements path, just never applied when there were zero
-# requirements to satisfy. Smaller than the facility-matching multiplier
-# since natural matching has no hard constraint to hunt for -- distance
-# tuning and turnaround diversity are the only sources of "wasted"
-# candidates here.
+# requirements to satisfy. The multiplier is smaller than the
+# facility-matching one since natural matching has no hard constraint
+# to hunt for; distance tuning and turnaround diversity are the only
+# sources of wasted candidates here.
 NO_FACILITY_POOL_MULTIPLIER = 3
 NO_FACILITY_POOL_CEILING = 10
 
@@ -82,18 +80,16 @@ class ScoredRoute:
 
 def _quality_score(route: GeneratedRoute) -> float:
     """Cheap route-quality proxy: less edge reuse and higher pedestrian
-    share is better. Deliberately simple -- this is a tie-breaker tier
-    (see `rank_key`), not the primary ranking signal.
+    share is better. Kept simple on purpose since this is a tie-breaker
+    tier (see `rank_key`), not the primary ranking signal.
 
     Edge reuse is zeroed for out_and_back: retracing the outbound leg on
     the return is that shape's defining, expected feature (an OAB's
-    edge_reuse_ratio is inherently ~0.5), not a defect -- see
+    edge_reuse_ratio is inherently ~0.5), not a defect. See
     `app/generation/quality.py`'s `edge_reuse_ratio` docstring. Counting
     it uniformly would unfairly penalize every OAB candidate relative to
     a round candidate whenever this score is compared across shapes
-    (e.g. `_select_mix_portfolio`'s cross-shape backfill below), the
-    exact "concrete OAB punished for legitimate retracing" failure mode
-    this scorer must avoid.
+    (e.g. `_select_mix_portfolio`'s cross-shape backfill below).
     """
     quality = route.quality
     reuse_penalty = 0.0 if route.shape == "out_and_back" else quality.edge_reuse_ratio
@@ -111,7 +107,7 @@ def score_candidates(
     """`facility_index` lets a caller scoring the same `facilities` list
     across many candidates/rescoring passes (see `plan_routes`) build the
     spatial index once and reuse it, instead of rebuilding it on every
-    call -- if omitted, a private index is built for this call only.
+    call. If omitted, a private index is built for this call only.
     `timing`, if given, is passed through to `score_facility_requirements`
     to accumulate encounter/assignment timing across every route scored."""
     index = facility_index if facility_index is not None else FacilitySpatialIndex(facilities)
@@ -153,20 +149,19 @@ def natural_match_pool(
     requirements: list[FacilityRequirement],
 ) -> list[GeneratedRoute]:
     """`requirements=[]` skips every facility-matching cost (Supabase,
-    snapping, encounters, assignment, constrained planners) -- but still
+    snapping, encounters, assignment, constrained planners), but still
     asks for a modest overcomplete pool of ordinary graph-route
     candidates (see `NO_FACILITY_POOL_MULTIPLIER`/`_CEILING`) so
-    `select_diverse` has real alternatives to choose `count` genuinely
-    distinct routes from, instead of hoping exactly `count` raw
-    candidates all survive construction and diversity filtering. Any
-    real requirement widens the pool further so natural matching has
-    enough candidates to find one that already happens to pass every
-    requested stop.
+    `select_diverse` has real alternatives to choose `count` distinct
+    routes from, instead of hoping exactly `count` raw candidates all
+    survive construction and diversity filtering. Any real requirement
+    widens the pool further so natural matching has enough candidates
+    to find one that already happens to pass every requested stop.
 
-    `count` here is the USER'S real requested final count -- the
-    inflated `pool_size` below (e.g. 9 or 12 for a real `count=3` ask)
-    is passed to `generate_routes` as its candidate-construction size,
-    but `count` itself is passed separately as `requested_count` so the
+    `count` here is the user's real requested final count. The inflated
+    `pool_size` below (e.g. 9 or 12 for a real `count=3` ask) is passed
+    to `generate_routes` as its candidate-construction size, but
+    `count` itself is passed separately as `requested_count` so the
     ordinary round-generator seam (`ROUND_GENERATOR=auto`, see
     `engine._round_generator_version`) picks a generator based on what
     the user actually asked for, not how many candidates were
@@ -189,10 +184,10 @@ def natural_match_pool(
 
 
 # count -> (round, out_and_back) target allocation for "mix" requests
-# with real candidates of both shapes available. Gracefully backfills
-# from the overall best-ranked remainder when one shape is short --
-# hard-constraint/quality rank (via `rank_key`) always outranks hitting
-# the exact portfolio quota.
+# with real candidates of both shapes available. Backfills from the
+# overall best-ranked remainder when one shape is short; hard-
+# constraint/quality rank (via `rank_key`) always outranks hitting the
+# exact portfolio quota.
 MIX_SHAPE_ALLOCATION: dict[int, tuple[int, int]] = {
     1: (1, 0),
     2: (1, 1),
@@ -206,13 +201,13 @@ def _constraint_tier(item: ScoredRoute) -> tuple[int, int, int, float, float]:
     """The hard-constraint-quality prefix of `rank_key`: fully-valid bit,
     within-tolerance bit, requirements-satisfied count, worst-single-
     requirement range error, total range error across requirements. Two
-    candidates in the same tier are equivalent on hard constraints --
+    candidates in the same tier are equivalent on hard constraints, so
     shape allocation may break ties between them. A candidate in a
     strictly better tier must never be displaced by shape quota (see
     `_select_mix_portfolio`).
 
-    Deliberately stops short of `rank_key`'s remaining fields
-    (`distance_error_m`, `quality_score`): once a route is inside the
+    Stops short of `rank_key`'s remaining fields (`distance_error_m`,
+    `quality_score`) on purpose: once a route is inside the
     distance tolerance, small exact-distance differences may reasonably
     yield to shape diversity, but facility-constraint miss magnitude
     (range error) may not. Fully-valid routes all have zero range error,
@@ -228,29 +223,29 @@ def _select_diverse_within_tiers(scored: list[ScoredRoute], count: int) -> list[
     """Tier-aware counterpart to a plain `select_diverse(scored, ...,
     count)` call for the non-mix (round / out_and_back) path.
 
-    `select_diverse` is a single greedy scan over the WHOLE ranked
+    `select_diverse` is a single greedy scan over the whole ranked
     list: once a higher-ranked item is skipped for overlapping an
-    already-picked one, the scan keeps walking downward looking for
-    ANY non-overlapping item to fill the remaining slots -- including
-    one from a strictly worse `_constraint_tier` (e.g. outside distance
-    tolerance) -- before ever getting a chance to reconsider the
-    skipped, better-tier item. Measured root cause of a real count=5
-    reliability gap: in constrained/narrow local topology, the FEW
-    candidates that converge to a genuine round loop often trace
-    near-identical streets (there's only one viable corridor), so two
-    in-tolerance candidates can overlap enough to trigger exactly this
-    -- the scan reaches an out-of-tolerance candidate ranked far below
-    before the skipped in-tolerance one is ever reconsidered, and a
-    tolerance-passing route is silently swapped for a failing one.
+    already-picked one, the scan keeps walking downward looking for any
+    non-overlapping item to fill the remaining slots, including one
+    from a strictly worse `_constraint_tier` (e.g. outside distance
+    tolerance), before ever getting a chance to reconsider the skipped,
+    better-tier item. This was the root cause of a count=5 reliability
+    gap: in constrained, narrow local topology, the few candidates that
+    converge to a genuine round loop often trace near-identical streets
+    (there's only one viable corridor), so two in-tolerance candidates
+    can overlap enough to trigger this scan pattern. The scan reaches
+    an out-of-tolerance candidate ranked far below before the skipped
+    in-tolerance one is ever reconsidered, swapping a tolerance-passing
+    route for a failing one.
 
-    This applies diversity WITHIN each tier instead: a whole tier that
+    This applies diversity within each tier instead: a whole tier that
     fits in the remaining slots is taken outright, and `select_diverse`
-    only ever picks a SUBSET of a tier too large for the remaining
-    slots -- so a candidate can never be selected ahead of a
-    same-or-better tier candidate, only in place of one from its own
-    tier. Mirrors `_select_mix_portfolio`'s already-proven tier-by-tier
-    pattern (which guarantees the identical property for mix's shape
-    allocation), minus the shape bookkeeping."""
+    only ever picks a subset of a tier too large for the remaining
+    slots. A candidate can never be selected ahead of a same-or-better
+    tier candidate, only in place of one from its own tier. Mirrors
+    `_select_mix_portfolio`'s tier-by-tier pattern (which guarantees
+    the identical property for mix's shape allocation), minus the
+    shape bookkeeping."""
     if count <= 1 or not scored:
         return scored[:count]
 
@@ -274,7 +269,7 @@ def _select_diverse_within_tiers(scored: list[ScoredRoute], count: int) -> list[
         )
         chosen.extend(picked)
 
-    # Tier-then-diversity selection only decides membership -- restore
+    # Tier-then-diversity selection only decides membership; restore
     # overall rank order for display, same as `_select_mix_portfolio`.
     rank_position = {id(item): index for index, item in enumerate(scored)}
     chosen.sort(key=lambda item: rank_position[id(item)])
@@ -288,7 +283,7 @@ def _select_mix_portfolio(scored: list[ScoredRoute], count: int) -> list[ScoredR
     remaining slots is taken outright (no shape filtering), and shape
     diversity is only used to pick a subset when a tier is larger than
     the remaining slots. This guarantees hard-constraint quality always
-    outranks mix-shape diversity -- a partial/worse-tier candidate can
+    outranks mix-shape diversity; a partial/worse-tier candidate can
     never bump a better-tier one just to fill a round/OAB quota."""
     if count <= 1 or not scored:
         return scored[:count]
@@ -315,7 +310,7 @@ def _select_mix_portfolio(scored: list[ScoredRoute], count: int) -> list[ScoredR
         if len(tier_items) <= slots_left:
             picked = tier_items
         else:
-            # This tier is a tie on hard-constraint quality -- shape
+            # This tier is a tie on hard-constraint quality; shape
             # diversity is a valid tie-breaker here, but never across tiers.
             tier_rounds = [s for s in tier_items if s.route.shape == "round"]
             tier_oabs = [s for s in tier_items if s.route.shape == "out_and_back"]
@@ -340,7 +335,7 @@ def _select_mix_portfolio(scored: list[ScoredRoute], count: int) -> list[ScoredR
             else:
                 remaining_oab = max(0, remaining_oab - 1)
 
-    # Tier/portfolio selection only decides membership -- restore overall
+    # Tier/portfolio selection only decides membership; restore overall
     # rank order for display.
     rank_position = {id(item): index for index, item in enumerate(scored)}
     chosen.sort(key=lambda item: rank_position[id(item)])
@@ -373,25 +368,25 @@ def plan_routes(
     *,
     constrained_planners: list[ConstrainedPlanner] | None = None,
 ) -> list[ScoredRoute]:
-    """Natural-match-first, then PROGRESSIVE constrained planning.
+    """Natural-match-first, then progressive constrained planning.
 
     Each applicable constrained planner runs one at a time, folding its
-    candidates into the pool and re-scoring immediately -- if that's
-    already enough fully-valid candidates for `count`, later planners are
-    skipped entirely rather than run unconditionally. This is a latency
+    candidates into the pool and re-scoring immediately. If that's
+    already enough fully-valid candidates for `count`, later planners
+    are skipped rather than run unconditionally. This is a latency
     optimization only: the final scorer/ranker (`rank_key`, applied by
-    `score_candidates`) stays the sole authority on which candidates are
-    "good," so early exit can never promote a worse hard-constraint tier
-    just because it arrived first -- it only avoids paying for search
-    effort that a stronger tier already made unnecessary.
+    `score_candidates`) stays the sole authority on which candidates
+    are good, so early exit can never promote a worse hard-constraint
+    tier just because it arrived first; it only avoids search effort
+    that a stronger tier already made unnecessary.
 
-    The `PlanningDeadline` is started at the very top of this call --
-    covering natural generation and scoring too, not just constrained
-    search -- so a slow natural phase leaves correspondingly less
-    budget for constrained planners rather than getting the full 25s on
-    top. It is a COOPERATIVE budget, not a hard preemptive cutoff:
-    checked before each expensive graph-routing operation in the
-    constrained planners (see `app/facilities/planning_deadline.py` and
+    The `PlanningDeadline` starts at the top of this call, covering
+    natural generation and scoring too, not just constrained search, so
+    a slow natural phase leaves correspondingly less budget for
+    constrained planners rather than getting the full 25s on top. It's
+    a cooperative budget, not a hard preemptive cutoff: it's checked
+    before each expensive graph-routing operation in the constrained
+    planners (see `app/facilities/planning_deadline.py` and
     `app/facilities/round_planner.py`/`oab_planner.py`), so actual
     overshoot is bounded by roughly one already-running synchronous
     graph operation, not by the budget itself. If the deadline expires
@@ -403,12 +398,12 @@ def plan_routes(
     total_start = time.perf_counter()
 
     # Built once and reused for every scoring pass below (natural, and
-    # every progressive-planner rescore) -- the facility catalog never
+    # every progressive-planner rescore): the facility catalog never
     # changes mid-request, so there's no reason to rebuild the spatial
     # index per candidate or per rescore (see FacilitySpatialIndex).
     facility_index = FacilitySpatialIndex(facilities)
     # Accumulates encounter-finding/assignment time across every
-    # scoring pass sharing this one dict -- see score_facility_requirements.
+    # scoring pass sharing this one dict; see score_facility_requirements.
     scoring_timing: dict[str, float] = {}
 
     pool = natural_match_pool(graph, start, target_distance_m, shape, count, requirements)
@@ -463,7 +458,7 @@ def plan_routes(
 
     total_s = time.perf_counter() - total_start
     # Computed unconditionally regardless of whether constrained planners
-    # ran -- the deadline covers the WHOLE call (including natural
+    # ran: the deadline covers the whole call (including natural
     # generation/scoring, see above), so a slow natural phase alone can
     # legitimately exhaust the budget even though the graph-search
     # cooperative checks (which only gate constrained-planner work) never

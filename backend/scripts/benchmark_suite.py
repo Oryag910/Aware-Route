@@ -657,7 +657,7 @@ def build_report(results: list[ScenarioResult]) -> str:
     shape_quality = {shape: _shape_quality(ok_results, shape) for shape in REPORT_SHAPES}
 
     lines: list[str] = []
-    lines.append(f"# Local engine benchmark report — {datetime.now().isoformat(timespec='seconds')}")
+    lines.append(f"# Local engine benchmark report: {datetime.now().isoformat(timespec='seconds')}")
     lines.append("")
     lines.append(f"Scenarios run: {len(results)}")
     lines.append(f"Succeeded (no exception): {len(ok_results)}")

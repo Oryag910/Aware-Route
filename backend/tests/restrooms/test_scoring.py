@@ -708,12 +708,12 @@ def test_score_and_rank_candidates_off_route_term_affects_matched_composite() ->
 
 
 def test_score_and_rank_candidates_backfills_with_fallback_when_understocked() -> None:  # noqa: E501
-    # One matched candidate and one fallback candidate. The plan's
-    # design says scoring returns ALL matched+fallback candidates in
-    # final order (matched first, then fallback) — main.py, not
-    # scoring.py, is responsible for slicing to `count`. This test
-    # confirms both pools are present and correctly ordered/labeled
-    # even when the matched pool alone wouldn't fill a request.
+    # One matched candidate and one fallback candidate. Scoring returns
+    # all matched+fallback candidates in final order (matched first,
+    # then fallback); main.py, not scoring.py, is responsible for
+    # slicing to `count`. This test confirms both pools are present and
+    # correctly ordered/labeled even when the matched pool alone
+    # wouldn't fill a request.
     matched_candidate = make_candidate(
         start_lat=40.70,
         longitude=-74.00,

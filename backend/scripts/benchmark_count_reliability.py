@@ -144,7 +144,7 @@ def _bucket_row(shape: str, bucket: list[CountResult]) -> str:
 def build_report(results: list[CountResult]) -> str:
     lines: list[str] = []
     lines.append(
-        f"# No-facility count-reliability benchmark — "
+        f"# No-facility count-reliability benchmark: "
         f"{datetime.now().isoformat(timespec='seconds')}"
     )
     lines.append("")
