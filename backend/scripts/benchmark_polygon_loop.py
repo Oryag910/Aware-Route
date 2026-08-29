@@ -353,7 +353,7 @@ def build_report(comparisons: list[ScenarioComparison]) -> str:
 
     lines: list[str] = []
     lines.append(
-        f"# Polygon-loop V1 vs V2 comparison (PR #15) — "
+        f"# Polygon-loop V1 vs V2 comparison (PR #15): "
         f"{datetime.now().isoformat(timespec='seconds')}"
     )
     lines.append("")

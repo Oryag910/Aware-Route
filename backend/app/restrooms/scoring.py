@@ -46,7 +46,7 @@ TURNS_PER_KM_CEILING = 6.0
 # Renormalized from the original 15:10:5:5 ratio now that distance_error
 # and mile_range_error are hard constraints instead of weighted factors.
 # 15:10:5:5 reduces to 3:2:1:1 (dividing by 5), and 3+2+1+1 = 7, so each
-# weight becomes its exact share of 7 — this preserves the original
+# weight becomes its exact share of 7, preserving the original
 # relative ratios among the four remaining factors. Off-route
 # reachability was then added as a fifth factor at the same 1-part
 # weight as similarity/restroom-confidence, so the denominator grows
@@ -190,7 +190,7 @@ def turn_density_norm(
 
 
 # Fallback candidates (those failing a hard constraint) are ranked by
-# combined normalized distance+range error, weighted equally — a
+# combined normalized distance+range error, weighted equally: a
 # simpler ranking since the point of a fallback is "closest to what
 # was asked," not route-quality nuance.
 WEIGHT_FALLBACK_DISTANCE_ERROR = 0.5
@@ -316,7 +316,7 @@ def best_restroom_waypoint(
     max_mile_m: float,
 ) -> Coordinate | None:
     """The restroom a candidate would be scored against, as a repair
-    via waypoint — distance repair reshapes a loop into an out-and-back
+    via waypoint. Distance repair reshapes a loop into an out-and-back
     through a nudged anchor, and without pinning the restroom the
     reshaped route routinely loses it (fixing one hard constraint by
     breaking the other)."""
@@ -437,7 +437,7 @@ def _rank_matched(
     ]
 
     # Similarity is computed against this provisional (7-factor) order
-    # rather than searching all orderings — similarity's own weight
+    # rather than searching all orderings; similarity's own weight
     # is small enough that this approximation is reasonable.
     provisional_order = sorted(
         range(len(matched)),
@@ -507,7 +507,7 @@ def _rank_fallback(
     mile_range_error_norms: list[float],
 ) -> list[ScoredCandidate]:
     # Fallback candidates skip the composite/similarity machinery
-    # entirely — the point of a fallback is "closest to what was
+    # entirely: the point of a fallback is "closest to what was
     # asked," not route-quality nuance, so it's ranked purely by
     # combined normalized distance+range error.
     scored_candidates = [

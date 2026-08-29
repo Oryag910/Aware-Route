@@ -509,7 +509,7 @@ def _correctness_table(results: list[ScenarioResult]) -> list[str]:
 
 def build_report(stratum_a: list[ScenarioResult], stratum_b: list[ScenarioResult], stratum_c: list[ScenarioResult]) -> str:
     lines: list[str] = []
-    lines.append(f"# Facility-routing benchmark report — {datetime.now().isoformat(timespec='seconds')}")
+    lines.append(f"# Facility-routing benchmark report: {datetime.now().isoformat(timespec='seconds')}")
     lines.append("")
     lines.append(
         "**Latency methodology**: every latency figure below is exactly ONE "

@@ -17,7 +17,7 @@
   --color-accent-sky: #5b8aa6; /* water / links */
 
   /* semantic states */
-  --color-success: #3f6b4f; /* "Matched" — a match is the good outcome */
+  --color-success: #3f6b4f; /* "Matched": a match is the good outcome */
   --color-warning: #8a6a2e; /* "Closest available" / tradeoff */
   --color-danger: #9c4a3c; /* errors */
 

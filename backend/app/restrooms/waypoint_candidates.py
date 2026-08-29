@@ -11,7 +11,7 @@ from app.routing.provider import Coordinate, RouteCandidate, RoutingProvider
 @dataclass(frozen=True)
 class RestroomFirstCandidate:
     """A generated route plus the restroom waypoint it was built
-    through — kept together so later stages (e.g. distance repair) can
+    through, kept together so later stages (e.g. distance repair) can
     preserve the restroom when reshaping the route."""
 
     candidate: RouteCandidate
